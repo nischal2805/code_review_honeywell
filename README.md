@@ -11,6 +11,8 @@ Covers four analysis domains required for avionics software certification:
 | Dead Code Detection | §6.4.2.2 | Dead vs deactivated code with removal/justification disposition |
 | Standards Validation | §5.1 + MISRA C++ | Violation report with compliance score and corrections |
 
+**Full usage guide:** [USAGE.md](USAGE.md) — step-by-step for all four objectives, TUI, CLI, Docker, chat interface, and troubleshooting.
+
 ---
 
 ## Requirements
