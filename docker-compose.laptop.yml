@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  rag-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.laptop
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3.1:8b
+      - OLLAMA_ENABLED=true
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+
+  ollama:
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+
+# First-time model pull:
+# docker compose -f docker-compose.yml -f docker-compose.laptop.yml exec ollama ollama pull llama3.1:8b

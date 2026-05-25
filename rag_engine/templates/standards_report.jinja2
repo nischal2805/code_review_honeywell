@@ -1,0 +1,23 @@
+# DO-178C Code Standards Compliance Report — §5.1
+Generated: {{ report_date }}
+DAL Level: {{ dal_level }}
+Compliance Score: {{ compliance_score }}%
+
+## Violations by Severity
+
+| Severity | Count |
+|----------|-------|
+| CRITICAL | {{ violations | selectattr('severity', 'eq', 'CRITICAL') | list | length }} |
+| MAJOR    | {{ violations | selectattr('severity', 'eq', 'MAJOR') | list | length }} |
+| MEDIUM   | {{ violations | selectattr('severity', 'eq', 'MEDIUM') | list | length }} |
+| MINOR    | {{ violations | selectattr('severity', 'eq', 'MINOR') | list | length }} |
+
+## Violations
+
+{% for v in violations %}
+**{{ v.rule }}** ({{ v.severity }})
+{% if v.misra_ref %}- MISRA: {{ v.misra_ref }}{% endif %}
+- {{ v.file }}:{{ v.line }} — `{{ v.element }}`
+- {{ v.message }}
+
+{% endfor %}

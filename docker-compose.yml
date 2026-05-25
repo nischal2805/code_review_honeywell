@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  rag-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.laptop
+    volumes:
+      - ./input:/data/input:ro
+      - ./output:/data/output
+      - ./lru_docs:/data/lru_docs:ro
+      - rag_cache:/app/.rag_cache
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  rag_cache:
+  ollama_models:

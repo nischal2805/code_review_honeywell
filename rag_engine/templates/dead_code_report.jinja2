@@ -1,0 +1,18 @@
+# Dead / Deactivated Code Report — DO-178C §6.4.2.2
+Generated: {{ report_date }}
+DAL Level: {{ dal_level }}
+
+## Summary
+Total items: {{ items | length }}
+Coverage impact: {{ coverage_impact }}
+
+## Items
+
+{% for item in items %}
+### {{ item.name }}
+- File: {{ item.file_path }}:{{ item.line_number }}
+- Category: {{ item.category }}
+- Disposition: {{ item.do178c_disposition }}
+- Coverage Impact: {{ item.coverage_impact }}
+
+{% endfor %}

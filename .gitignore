@@ -1,0 +1,6 @@
+__pycache__/
+docs/
+*.egg-info
+.coverage
+.rag_cache/hashes.json
+.vscode/settings.json

@@ -1,0 +1,33 @@
+# Virtual Analysis Report — DO-178C §12
+Generated: {{ report_date }}
+DAL Level: {{ dal_level }}
+
+## Summary
+- Base virtual count:    {{ base_virtual_count }}
+- Current virtual count: {{ current_virtual_count }}
+- Added:    {{ summary.added }}
+- Removed:  {{ summary.removed }}
+- Modified: {{ summary.modified }}
+- Unchanged: {{ summary.unchanged }}
+
+## Changes
+
+{% for change in changes %}
+### {{ change.function.name }}
+- Change Type: {{ change.change_type | upper }}
+- DO-178C Category: {{ change.do178c_category }}
+- File: {{ change.function.file_path }}:{{ change.function.line_number }}
+{% if change.base_version %}
+- Base Signature: `{{ change.base_version.signature }}`
+{% endif %}
+{% if change.current_version %}
+- Current Signature: `{{ change.current_version.signature }}`
+{% endif %}
+{% if change.reverification_scope %}
+- Reverification Scope: {{ change.reverification_scope }}
+{% endif %}
+{% if change.function.do178c_requirement_trace %}
+- Requirement Trace: {{ change.function.do178c_requirement_trace }}
+{% endif %}
+
+{% endfor %}

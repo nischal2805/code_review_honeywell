@@ -1,0 +1,13 @@
+{
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Windows",
+  "pythonPath": "C:\\Users\\nisch\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
+  "include": ["rag_engine", "tests", "main.py"],
+  "extraPaths": [
+    "E:\\honeywell",
+    "C:\\Users\\nisch\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}
