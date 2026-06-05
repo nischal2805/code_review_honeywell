@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile.laptop
     environment:
       - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_MODEL=llama3.1:8b
+      - OLLAMA_MODEL=qwen2.5-coder:1.5b
       - OLLAMA_ENABLED=true
     deploy:
       resources:
@@ -24,4 +24,4 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=1
 
 # First-time model pull:
-# docker compose -f docker-compose.yml -f docker-compose.laptop.yml exec ollama ollama pull llama3.1:8b
+# docker compose -f docker-compose.yml -f docker-compose.laptop.yml exec ollama ollama pull qwen2.5-coder:1.5b

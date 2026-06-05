@@ -1,0 +1,3 @@
+PID controller unit. Manages pitch, roll, yaw rate control loops.
+Functions: update_gains, get_p, get_i, get_d, reset_filter.
+Signals: pid_p, pid_i, pid_d, target_rate, actual_rate, error.

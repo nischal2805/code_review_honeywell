@@ -11,7 +11,7 @@ from rag_engine.models import FunctionDef
 
 
 class SemanticSearch:
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', threshold: float = 0.6) -> None:
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', threshold: float = 0.3) -> None:
         logger.info(f"Loading embedding model: {model_name}")
         self._model = SentenceTransformer(model_name)
         self._threshold = threshold
@@ -41,6 +41,11 @@ class SemanticSearch:
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and float(score) >= self._threshold:
                 results.append(self._functions[idx])
+        # Fallback: if nothing clears threshold, return best k matches to ensure grounding
+        if not results:
+            for score, idx in zip(scores[0], indices[0]):
+                if idx >= 0:
+                    results.append(self._functions[idx])
         return results
 
     def save(self, path: str) -> None:

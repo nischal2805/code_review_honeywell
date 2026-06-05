@@ -18,6 +18,8 @@ class DocReader:
                     results[path.stem.upper()] = self._read_pdf(path)
                 elif suffix in ('.docx', '.doc'):
                     results[path.stem.upper()] = self._read_docx(path)
+                elif suffix == '.txt':
+                    results[path.stem.upper()] = path.read_text(encoding='utf-8', errors='replace')
             except Exception as exc:
                 logger.warning(f"Read failed {path}: {exc}")
         logger.info(f"Loaded {len(results)} LRU documents from {doc_dir}")

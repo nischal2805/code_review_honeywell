@@ -26,7 +26,7 @@ class OllamaClient:
             r = httpx.post(f"{self._url}/api/generate",
                            json={'model': self._model, 'prompt': prompt, 'stream': False,
                                  'options': {'num_predict': max_tokens, 'temperature': 0.1}},
-                           timeout=120)
+                           timeout=300)
             r.raise_for_status()
             return r.json().get('response', '').strip()
         except Exception as exc:

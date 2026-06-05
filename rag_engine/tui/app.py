@@ -135,6 +135,7 @@ class AnalysisResults:
     dead: Any = None
     standards: Any = None
     checklist: Any = None
+    search: Any = None
     error: Optional[str] = None
 
 
@@ -339,9 +340,54 @@ class AnalysisScreen(Screen):
             # Coupling
             coupling = CouplingAnalyzer(current, gb, search, lru_docs).analyze()
 
+            # RAG narrative enrichment
+            from rag_engine.llm.ollama_client import OllamaClient
+            from rag_engine.llm.rag_narrator import RAGNarrativeGenerator
+            llm_narratives: dict = {}
+            llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
+            if cfg.ollama_enabled and llm.is_available():
+                self._log("[bold]Generating RAG narratives via LLM...[/bold]")
+                rag = RAGNarrativeGenerator(llm, search)
+                rag_tasks = {
+                    'virtual': (
+                        "virtual function change reverification DO-178C category",
+                        f"Virtual: added={virtual.summary.get('added',0)}, removed={virtual.summary.get('removed',0)}, "
+                        f"modified={virtual.summary.get('modified',0)}, unchanged={virtual.summary.get('unchanged',0)}. "
+                        f"Assess reverification scope per DO-178C §12."
+                    ),
+                    'coupling': (
+                        "LRU control data coupling dependency interface",
+                        f"Coupling for {len(coupling.lru_impacts)} LRUs. "
+                        f"Risk levels: {[(k, v.risk_level) for k, v in coupling.lru_impacts.items()]}. "
+                        f"Assess coupling impact on DAL {cfg.dal_level}."
+                    ),
+                    'dead_code': (
+                        "dead code unreachable deactivated function coverage",
+                        f"Dead code: {dead.dead_count} dead, {dead.deactivated_count} deactivated, "
+                        f"total {dead.total_functions}. Coverage: {dead.structural_coverage_impact}. "
+                        f"Assess DO-178C §6.4.2.2 compliance."
+                    ),
+                    'standards': (
+                        "MISRA C++ DO-178C code standard naming complexity violation",
+                        f"Standards: score={standards.compliance_score:.1f}%, "
+                        f"severities={standards.violations_by_severity}. "
+                        f"Assess DO-178C §5.1 and MISRA C++ status."
+                    ),
+                }
+                for key, (query, summary) in rag_tasks.items():
+                    try:
+                        narrative = rag.generate(query, summary, k=8, max_tokens=400)
+                        if narrative:
+                            llm_narratives[key] = narrative
+                            self._log(f"  [green]RAG narrative: {key}[/green]")
+                    except Exception as exc:
+                        self._log(f"  [yellow]LLM skipped {key}: {exc}[/yellow]")
+
             # Reports + checklist
             gen = ReportGenerator(cfg)
-            gen.generate_all(virtual, coupling, dead, standards, format=self._output_fmt)  # type: ignore[arg-type]
+            gen.generate_all(virtual, coupling, dead, standards,
+                             format=self._output_fmt,  # type: ignore[arg-type]
+                             llm_narratives=llm_narratives)
             checklist = ChecklistFiller(cfg).fill_sqa_checklist(virtual, dead, standards)
 
             self._results.virtual = virtual
@@ -349,6 +395,7 @@ class AnalysisScreen(Screen):
             self._results.dead = dead
             self._results.standards = standards
             self._results.checklist = checklist
+            self._results.search = search
             self._log("[bold green]Analysis complete. Reports written to output/[/bold green]")
             self.app.call_from_thread(
                 lambda: self.app.push_screen(ResultsScreen(self._results, cfg.output_dir))
@@ -598,6 +645,15 @@ class ChatScreen(Screen):
         self._history = [{"role": "system", "content": "\n".join(parts)}]
 
     def _ask(self, question: str) -> str:
+        if self._ollama and self._ollama.is_available() and self._results.search:
+            from rag_engine.llm.rag_narrator import RAGNarrativeGenerator
+            rag = RAGNarrativeGenerator(self._ollama, self._results.search)
+            analysis_ctx = "\n".join(
+                f"{m['content']}" for m in self._history[:1]
+            )
+            answer = rag.answer_question(question, analysis_ctx, k=8, max_tokens=500)
+            if answer:
+                return answer
         if self._ollama and self._ollama.is_available():
             self._history.append({"role": "user", "content": question})
             ctx = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in self._history[-6:])

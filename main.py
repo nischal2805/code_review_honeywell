@@ -19,6 +19,7 @@ from rag_engine.features.standards_validator import StandardsValidator
 from rag_engine.features.virtual_analysis import VirtualAnalyzer
 from rag_engine.knowledge_base.index_manager import IndexManager
 from rag_engine.llm.ollama_client import OllamaClient
+from rag_engine.llm.rag_narrator import RAGNarrativeGenerator
 from rag_engine.reporting.checklist_filler import ChecklistFiller
 from rag_engine.reporting.report_generator import ReportGenerator
 
@@ -79,13 +80,58 @@ def analyze(
             raise
 
     llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
+    llm_narratives: dict = {}
     if cfg.ollama_enabled and llm.is_available():
         logger.info(f"LLM enrichment via {cfg.ollama_model}")
+        rag = RAGNarrativeGenerator(llm, search)
+        rag_tasks = {
+            'virtual': (
+                "virtual function change reverification DO-178C category",
+                f"Virtual function analysis:\n"
+                f"Added: {results['virtual'].summary.get('added', 0)}, "
+                f"Removed: {results['virtual'].summary.get('removed', 0)}, "
+                f"Modified: {results['virtual'].summary.get('modified', 0)}, "
+                f"Unchanged: {results['virtual'].summary.get('unchanged', 0)}.\n"
+                f"Changes: {[f'{c.function.name} ({c.do178c_category})' for c in results['virtual'].changes[:5]]}\n"
+                f"Assess reverification scope required per DO-178C §12."
+            ),
+            'coupling': (
+                "LRU control data coupling dependency interface",
+                f"Coupling analysis for {len(results['coupling'].lru_impacts)} LRUs.\n"
+                f"Risk levels: {[(k, v.risk_level) for k, v in results['coupling'].lru_impacts.items()]}\n"
+                f"Assess control/data coupling impact on DAL {cfg.dal_level} certification."
+            ),
+            'dead_code': (
+                "unreachable function structural coverage",
+                f"Dead code analysis: {results['dead_code'].dead_count} dead functions, "
+                f"{results['dead_code'].deactivated_count} deactivated, "
+                f"out of {results['dead_code'].total_functions} total.\n"
+                f"Coverage impact: {results['dead_code'].structural_coverage_impact}\n"
+                f"Assess DO-178C §6.4.2.2 compliance and structural coverage risk."
+            ),
+            'standards': (
+                "MISRA C++ DO-178C code standard naming complexity violation",
+                f"Standards compliance: score {results['standards'].compliance_score:.1f}%, "
+                f"violations by severity: {results['standards'].violations_by_severity}.\n"
+                f"Top rules: {list(set(v.rule for v in results['standards'].violations[:10]))}\n"
+                f"Assess DO-178C §5.1 and MISRA C++ compliance status."
+            ),
+        }
+        k_map = {'virtual': 8, 'coupling': 8, 'dead_code': 3, 'standards': 5}
+        for key, (query, summary) in rag_tasks.items():
+            try:
+                narrative = rag.generate(query, summary, k=k_map.get(key, 8), max_tokens=800)
+                if narrative:
+                    llm_narratives[key] = narrative
+                    logger.info(f"  LLM narrative: {key}")
+            except Exception as exc:
+                logger.warning(f"  LLM failed for {key}: {exc}")
 
     gen = ReportGenerator(cfg)
     paths = gen.generate_all(results['virtual'], results['coupling'],
                              results['dead_code'], results['standards'],
-                             format=output_format)  # type: ignore[arg-type]
+                             format=output_format,  # type: ignore[arg-type]
+                             llm_narratives=llm_narratives)
 
     ChecklistFiller(cfg).fill_sqa_checklist(results['virtual'], results['dead_code'], results['standards'])
 

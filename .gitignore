@@ -2,5 +2,7 @@ __pycache__/
 docs/
 *.egg-info
 .coverage
-.rag_cache/hashes.json
+.rag_cache/
+output/
+input/
 .vscode/settings.json

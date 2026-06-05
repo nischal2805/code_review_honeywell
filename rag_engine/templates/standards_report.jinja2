@@ -12,6 +12,12 @@ Compliance Score: {{ compliance_score }}%
 | MEDIUM   | {{ violations | selectattr('severity', 'eq', 'MEDIUM') | list | length }} |
 | MINOR    | {{ violations | selectattr('severity', 'eq', 'MINOR') | list | length }} |
 
+{% if llm_narrative %}
+## AI Certification Assessment
+
+{{ llm_narrative }}
+{% endif %}
+
 ## Violations
 
 {% for v in violations %}

@@ -6,6 +6,12 @@ DAL Level: {{ dal_level }}
 Total items: {{ items | length }}
 Coverage impact: {{ coverage_impact }}
 
+{% if llm_narrative %}
+## AI Certification Assessment
+
+{{ llm_narrative }}
+{% endif %}
+
 ## Items
 
 {% for item in items %}

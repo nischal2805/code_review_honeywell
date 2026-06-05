@@ -1,0 +1,3 @@
+Battery management unit. Monitors voltage, current, capacity remaining.
+Functions: read_voltage, get_current, capacity_remaining, battery_failsafe.
+Signals: voltage, current, mah_consumed, battery_level, low_battery.

@@ -3,8 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/models/huggingface \
-    TRANSFORMERS_OFFLINE=1
+    HF_HOME=/models/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl \
@@ -23,6 +22,8 @@ COPY main.py config.yaml ./
 RUN mkdir -p /data/input /data/output /data/lru_docs .rag_cache
 
 VOLUME ["/data/input", "/data/output", "/data/lru_docs"]
+
+ENV TRANSFORMERS_OFFLINE=1
 
 ENTRYPOINT ["python", "main.py"]
 CMD ["analyze", "/data/input", "--output-format", "markdown"]

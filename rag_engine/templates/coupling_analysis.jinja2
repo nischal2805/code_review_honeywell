@@ -23,3 +23,9 @@ Risk Level: {{ coupling.risk_level | upper }}
 {% endfor %}
 
 {% endfor %}
+
+{% if llm_narrative %}
+## AI Certification Assessment
+
+{{ llm_narrative }}
+{% endif %}

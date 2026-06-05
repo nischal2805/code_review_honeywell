@@ -1,0 +1,3 @@
+Motor control unit. Manages motor output, throttle commands, spin rates.
+Functions: set_throttle, output_min, output_max, motor_enabled, get_motor_mask.
+Signals: throttle_in, motor_out, pwm_output, spin_rate, arm_motors.
