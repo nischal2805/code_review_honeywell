@@ -1,0 +1,69 @@
+=================================================================
+Summary: How the Coding Standard Validator Works
+=================================================================
+
+This document explains the step-by-step process of how this tool validates a C++ codebase against DO-178C and MISRA-style coding standards.
+
+---------------------------------
+1. The Goal of the Validator
+---------------------------------
+The main purpose of the `StandardsValidator` is to automatically check the source code for compliance with safety-critical coding rules. It acts like an automated code reviewer, finding problems that would be tedious for a human to find manually. The final output is a "Compliance Report" that lists every violation and gives the codebase a score.
+
+---------------------------------
+2. The Three-Step Process
+---------------------------------
+
+Step 1: Understand the Code (Parsing)
+The tool doesn't just read the code as plain text. It uses a parser to build a structural understanding of every function. For each function, it calculates key metrics:
+- Cyclomatic Complexity: How many decision paths are in the function? (A measure of complexity).
+- Line Count: How many lines of code are in the function?
+- Nesting Depth: How many levels of `if/for/while` are nested?
+- Function Calls: Which other functions does this one call?
+- Docstring: Is there a comment block explaining the function?
+
+Step 2: Check Against the Rulebook (Validation)
+Once the code is understood, the validator checks it against a set of rules. The logic for these checks is in `rag_engine/features/standards_validator.py`. The checks fall into three main categories:
+
+  A) Complexity Rules (Is the code too complicated?)
+     - Checks if complexity, line count, nesting, or parameter count exceed the limits defined in `config.yaml`.
+     - Example: `if fn.cyclomatic_complexity > 10` -> VIOLATION
+     - Severity: These are usually `MEDIUM` or `MINOR`.
+
+  B) Prohibited "Red Card" Rules (Is the code using forbidden constructs?)
+     - Searches the function's text for keywords that are banned in high-safety systems.
+     - `goto` -> CRITICAL Violation
+     - `new`, `delete`, `malloc` (dynamic memory) -> CRITICAL Violation
+     - `try`, `catch` (exceptions) -> MAJOR Violation
+     - Recursion (a function calling itself) -> MAJOR Violation
+     - Severity: These are `CRITICAL` or `MAJOR` because they introduce unpredictable behavior.
+
+  C) Documentation & Style Rules (Is the code clean and readable?)
+     - Checks if a function is missing its documentation comment.
+     - Checks for basic naming convention violations.
+     - Severity: These are usually `MINOR`.
+
+Step 3: Create a Report Card (Reporting)
+After all checks are done, the tool generates a `ComplianceReport`. This report includes:
+- A complete list of all violations found.
+- The severity of each violation (`CRITICAL`, `MAJOR`, `MEDIUM`, `MINOR`).
+- A final "Compliance Score" (e.g., 95%) to give a quick overview of the code's health.
+- A list of suggested fixes for common problems.
+
+---------------------------------
+3. Key Files and Concepts
+---------------------------------
+
+- `standards_validator.py`: This file contains the ACTUAL IMPLEMENTATION of the checks. It's where the logic for finding violations lives.
+
+- Hardcoded Severities: The decision of whether a rule is `CRITICAL`, `MAJOR`, etc., is **hardcoded** directly in `standards_validator.py`. For example, finding a `goto` will ALWAYS result in a `CRITICAL` violation. This is a simplification in the current code.
+
+- `config.yaml`: This file is used to configure the **thresholds** for complexity rules (e.g., `cyclomatic_complexity_max: 10`). It allows you to make the rules more or less strict without changing the code.
+
+- The DAL (Design Assurance Level):
+  - In the TUI, you can select a DAL (A, B, C, D).
+  - Currently, this selection is ONLY used as a **label** on the final report.
+  - It does **NOT** change which rules are run or how strict the checks are. In a real-world tool, selecting DAL A would trigger much stricter checks than DAL C. This is a key area for future improvement.
+
+- Ollama (The Optional AI Narrator):
+  - Ollama is **NOT** part of the core analysis. The analysis is 100% deterministic.
+  - If enabled, Ollama is used as a "commentator" to write human-readable summaries for the reports and to power the interactive chat. It explains what the results *mean*.

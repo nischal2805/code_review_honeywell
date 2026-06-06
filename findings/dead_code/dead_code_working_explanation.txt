@@ -1,0 +1,167 @@
+DEAD CODE DETECTION - SIMPLE EXPLANATION
+========================================
+
+What is dead code?
+------------------
+Dead code is code that exists in the project but can never be executed.
+
+For example:
+
+    void unusedFunction() {
+        // This is dead if no reachable function ever calls it.
+    }
+
+
+How this project finds dead code
+--------------------------------
+
+1. Read the C++ files
+
+   The project scans the selected C++ directory and reads .cpp, .h, and .hpp
+   files.
+
+   File used:
+   rag_engine/core/parser.py
+
+
+2. Find all function definitions
+
+   The parser finds functions such as:
+
+       main
+       startMotor
+       stopMotor
+       unusedFunction
+
+   It stores information including the function name, file path, line number,
+   function body, size, and complexity.
+
+
+3. Build a function call graph
+
+   The call graph records which function calls another function.
+
+   Example:
+
+       main -> startMotor -> checkSpeed
+
+   This means main calls startMotor, and startMotor calls checkSpeed.
+
+   File used:
+   rag_engine/core/graph_builder.py
+
+
+4. Start from configured entry points
+
+   An entry point is a function where program execution can begin.
+
+   The current entry point is configured in config.yaml:
+
+       entry_points:
+         - main
+
+   The detector starts from main and follows every function call it can find.
+
+   Example:
+
+       main -> startMotor -> checkSpeed
+
+   In this example, all three functions are reachable and are not dead.
+
+
+5. Find unreachable functions
+
+   Any parsed function that cannot be reached from an entry point is initially
+   considered unreachable.
+
+   Example:
+
+       main -> startMotor
+
+       unusedFunction
+
+   Because there is no call path from main to unusedFunction, unusedFunction
+   is unreachable.
+
+
+6. Classify unreachable functions
+
+   The detector applies some rules before reporting unreachable functions:
+
+   - Callback-like functions are excluded because another system may call them.
+     Examples include names containing callback, handler, listener, ISR, or Init.
+
+   - Virtual functions are excluded because they may be called dynamically.
+
+   - Test, mock, stub, and fixture functions are classified as
+     deactivated_code.
+
+   - Other unreachable functions are classified as dead_code and receive the
+     action "Remove".
+
+   File used:
+   rag_engine/features/dead_code_detector.py
+
+
+7. Generate the report
+
+   The report contains:
+
+   - Function name
+   - File path and line number
+   - Category, such as dead_code or deactivated_code
+   - Recommended action
+   - Approximate structural coverage impact
+
+   Default report:
+   output/dead_code_report.docx
+
+
+How to run it
+-------------
+
+Run this command from the project directory:
+
+    python main.py analyze <path-to-cpp-code>
+
+Example using the included test fixture:
+
+    python main.py analyze tests/fixtures/cpp/current_build
+
+
+Important configuration
+-----------------------
+
+The entry_points list in config.yaml must contain every real starting point in
+the software.
+
+For embedded or RTOS software, this may include:
+
+    entry_points:
+      - main
+      - initSystem
+      - motorTask
+      - handleISR
+
+If an entry point is missing, functions called from it may be incorrectly
+reported as dead.
+
+
+Current limitations
+-------------------
+
+- It detects dead functions, not unreachable lines inside a function.
+- It does not currently detect unused local variables.
+- Function calls are detected using function names and a regular expression.
+- Function pointers and some dynamic calls may not be detected.
+- Virtual functions are excluded even when they may actually be dead.
+- Functions with the same name can be confused or overwrite each other.
+
+
+Short summary
+-------------
+
+The project finds dead code by starting from configured entry points, following
+known function calls, and reporting functions that cannot be reached. Before
+reporting them, it excludes likely callbacks and virtual functions, and treats
+test-related functions as deactivated code.

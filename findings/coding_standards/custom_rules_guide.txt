@@ -1,0 +1,60 @@
+# Guide: How to Use Your Own Custom Coding Standards
+
+This document explains how to configure this tool to use the rules from your own custom coding standard document (e.g., a PDF you provide).
+
+Currently, the process involves a manual update to the `config.yaml` file. By following these steps, you can make the tool enforce your specific rules.
+
+---
+## The Two-Step Process
+
+### Step 1: Understand Your Custom Rule
+
+First, identify a specific rule in your coding standard document.
+
+**Example:** Imagine your PDF document has the following rule for DAL A:
+> "Section 5.2.1: To ensure testability, no function shall have a cyclomatic complexity greater than 8."
+
+### Step 2: Translate the Rule into `config.yaml`
+
+Next, you must manually update the `config.yaml` file to match the rule from your document. This file acts as the machine-readable version of your standard.
+
+**Action:**
+1. Open the `config.yaml` file.
+2. Find the correct section for your rule. In our example, this is under `dal_specific_standards`, then `A`, then `complexity`.
+3. Change the value to match your rule.
+
+**Example based on the rule above:**
+
+You would change this line in `config.yaml`:
+
+```yaml
+# In config.yaml, under dal_specific_standards: -> A: -> complexity:
+cyclomatic_complexity_max: 10 # This is the old value
+```
+
+...to this:
+
+```yaml
+# In config.yaml, under dal_specific_standards: -> A: -> complexity:
+cyclomatic_complexity_max: 8 # This is the new value from your document
+```
+
+---
+## How to Find the Right Place in `config.yaml`
+
+The `config.yaml` file is organized to be easy to understand:
+
+- **`dal_specific_standards`**: This is the main section for rules that change based on the Design Assurance Level (DAL). It contains subsections for `A`, `B`, and `C`.
+    - **`complexity`**: This subsection holds the limits for metrics like `cyclomatic_complexity_max`, `function_length_max`, etc.
+    - **`severities`**: This subsection defines whether a prohibited feature (like `dynamic_memory` or `recursion`) is `FORBIDDEN`, `Restricted`, or `Allowed` for that DAL.
+
+- **`universal_standards`**: This section is for rules that are the same for all DALs (e.g., `goto` is always `FORBIDDEN`).
+
+- **`naming_conventions`**: This section holds the rules for naming styles (e.g., `PascalCase` vs. `camelCase`).
+
+---
+## Final Step: Rerun the Analysis
+
+After you have saved your changes to `config.yaml`, you must restart the analysis or re-run the tool. The tool will then load your new custom rules and enforce them on the codebase.
+
+**Future Goal:** In the future, this tool aims to automate the process by parsing the PDF directly. For now, this manual configuration step gives you full control over the validation process.

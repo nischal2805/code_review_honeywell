@@ -1,0 +1,55 @@
+===========================================================================
+5. COMPARISON: OLD VS. NEW PROFESSIONAL APPROACH
+===========================================================================
+
+This table summarizes why the new DAL-aware, configuration-driven approach
+is significantly more professional and suitable for a safety-critical project.
+
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+| Aspect            | Old Way (Hardcoded)                 | New Way (DAL-Aware & Config-Driven)       | Why It's More Professional                           |
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+| Flexibility       | To change a rule (e.g., maximum     | Rules are modified in the config.yaml     | Separation of Concerns: The "rules" (what to check) |
+|                   | complexity from 10 to 12), a        | file. No source code changes are          | are separated from the "engine" (how to check).     |
+|                   | developer had to edit Python code.  | required when adjusting rule thresholds.  | This is a fundamental software engineering practice.|
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+| DAL Compliance    | DAL selection was merely a label    | DAL selection directly drives the         | This aligns with DO-178C principles. The rigor of   |
+|                   | shown in the report and had no      | analysis process. Selecting DAL A         | verification activities depends on the assigned     |
+|                   | impact on validation.               | enforces stricter checks than DAL C.      | Design Assurance Level (DAL).                       |
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+| Auditability      | Auditors would need to inspect      | Auditors can review the config.yaml       | Traceability and verification become significantly  |
+|                   | Python source code to understand    | file to understand all validation rules.  | easier. Requirements can be mapped directly to      |
+|                   | applicable rules.                   | The rules are explicit and human-readable.| configuration entries.                              |
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+| Maintainability   | Adding or modifying rules required  | New rules can be introduced through       | Reduced Risk: Configuration changes are isolated    |
+|                   | changes to validation logic,        | configuration updates with minimal        | from the validation engine, lowering the chance of  |
+|                   | increasing the risk of regressions. | impact on core engine behavior.           | introducing defects.                                |
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+| Scalability       | Supporting multiple projects with   | Different projects can use different      | Reusability: A single validation engine can support |
+|                   | different standards required code   | configuration files while sharing the     | multiple projects, standards, and compliance        |
+|                   | modifications or complex condition  | same validation engine.                   | requirements.                                       |
+|                   | handling.                           |                                           |                                                      |
++-------------------+--------------------------------------+-------------------------------------------+------------------------------------------------------+
+
+SIMPLE ANALOGY
+---------------------------------------------------------------------------
+
+Before:
+--------
+You had a calculator with the numbers 5 and 10 permanently soldered onto
+the circuit board. Any change required modifying the hardware itself.
+
+Now:
+----
+You have a configurable calculator where the values are entered externally.
+The calculation engine remains unchanged while the inputs can be adjusted
+whenever needed.
+
+CONCLUSION
+---------------------------------------------------------------------------
+
+The DAL-aware, configuration-driven architecture represents a professional,
+industry-aligned approach to software quality assurance. It improves
+flexibility, auditability, maintainability, scalability, and compliance
+with DO-178C principles. By separating validation rules from validation
+logic, the tool becomes easier to certify, easier to maintain, and more
+suitable for safety-critical software development environments.
