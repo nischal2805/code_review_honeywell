@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import json
 os.environ.setdefault('USE_TF', '0')
 os.environ.setdefault('USE_TORCH', '1')
 
@@ -19,6 +20,8 @@ from textual.widgets import (
     TabbedContent, TabPane,
 )
 from textual.worker import Worker, WorkerState
+
+from rag_engine.knowledge_base.standards_profile import load_raw_standards_profile
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Offline Q&A helper — answers common questions from structured results
@@ -177,6 +180,8 @@ class ConfigScreen(Screen):
             yield Input(placeholder="/path/to/base_build", id="base-build")
             yield Static("LRU documents directory (optional)")
             yield Input(placeholder="/path/to/lru_docs", id="lru-docs")
+            yield Static("Standards profile file (optional, YAML/JSON/PDF/DOCX/TXT)")
+            yield Input(placeholder="/path/to/standards.yaml", id="standards-file")
             yield Static("Output format")
             yield Select(
                 [("DOCX (Word)", "docx"), ("Markdown", "markdown")],
@@ -189,6 +194,7 @@ class ConfigScreen(Screen):
                 value="B", id="dal-level",
             )
             with Horizontal(id="btn-row"):
+                yield Button("Preview Standards", variant="default", id="btn-preview")
                 yield Button("Run Analysis", variant="primary", id="btn-run")
                 yield Button("Quit", variant="error", id="btn-quit")
         yield Footer()
@@ -196,6 +202,21 @@ class ConfigScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-quit":
             self.app.exit()
+        elif event.button.id == "btn-preview":
+            standards_file = self.query_one("#standards-file", Input).value.strip()
+            if not standards_file:
+                self.notify("Standards file is required for preview", severity="error")
+                return
+            path = Path(standards_file).expanduser()
+            if not path.exists():
+                self.notify(f"Standards file not found: {standards_file}", severity="error")
+                return
+            try:
+                profile = load_raw_standards_profile(path)
+            except Exception as exc:
+                self.notify(f"Failed to load standards profile: {exc}", severity="error")
+                return
+            self.app.push_screen(StandardsPreviewScreen(str(path), profile))
         elif event.button.id == "btn-run":
             codebase = self.query_one("#codebase", Input).value.strip()
             if not codebase:
@@ -206,9 +227,66 @@ class ConfigScreen(Screen):
                 return
             base_build = self.query_one("#base-build", Input).value.strip() or None
             lru_docs = self.query_one("#lru-docs", Input).value.strip() or None
+            standards_file = self.query_one("#standards-file", Input).value.strip() or None
             output_fmt = self.query_one("#output-format", Select).value
             dal = self.query_one("#dal-level", Select).value
-            self.app.push_screen(AnalysisScreen(codebase, base_build, lru_docs, str(output_fmt), str(dal)))
+            if standards_file and not Path(standards_file).expanduser().exists():
+                self.notify(f"Standards file not found: {standards_file}", severity="error")
+                return
+            self.app.push_screen(AnalysisScreen(codebase, base_build, lru_docs, standards_file, str(output_fmt), str(dal)))
+
+
+def _format_profile(profile: dict[str, Any]) -> str:
+    return json.dumps(profile, indent=2, sort_keys=False)
+
+
+class StandardsPreviewScreen(Screen):
+    CSS = """
+    StandardsPreviewScreen {
+        align: center middle;
+    }
+    #preview-panel {
+        width: 100;
+        height: 34;
+        border: solid $primary;
+        padding: 1 2;
+    }
+    #preview-title {
+        margin-bottom: 1;
+    }
+    #preview-log {
+        height: 1fr;
+        border: solid $surface;
+        margin: 1 0;
+    }
+    #preview-buttons {
+        height: 3;
+        align: right middle;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, standards_path: str, profile: dict[str, Any]) -> None:
+        super().__init__()
+        self._standards_path = standards_path
+        self._profile = profile
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Container(id="preview-panel"):
+            yield Static(f"Structured standards profile extracted from {self._standards_path}", id="preview-title")
+            yield RichLog(id="preview-log", highlight=False, markup=False, wrap=True)
+            with Horizontal(id="preview-buttons"):
+                yield Button("Back", variant="primary", id="btn-back")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        log = self.query_one("#preview-log", RichLog)
+        log.write(_format_profile(self._profile))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-back":
+            self.app.pop_screen()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,11 +322,12 @@ class AnalysisScreen(Screen):
     """
 
     def __init__(self, codebase: str, base_build: Optional[str], lru_docs: Optional[str],
-                 output_fmt: str, dal: str) -> None:
+                 standards_file: Optional[str], output_fmt: str, dal: str) -> None:
         super().__init__()
         self._codebase = codebase
         self._base_build = base_build
         self._lru_docs = lru_docs
+        self._standards_file = standards_file
         self._output_fmt = output_fmt
         self._dal = dal
         self._results = AnalysisResults()
@@ -299,6 +378,8 @@ class AnalysisScreen(Screen):
             cfg = load_config()
             cfg.dal_level = self._dal  # type: ignore[assignment]
             cfg.output_dir = 'output'
+            if self._standards_file:
+                cfg.standards_file = self._standards_file
 
             # Parse
             self._log("[bold]Parsing C++ files...[/bold]")

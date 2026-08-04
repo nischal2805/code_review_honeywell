@@ -31,12 +31,18 @@ def analyze(
     codebase: str = typer.Argument(..., help='Path to C++ codebase directory'),
     base_build: Optional[str] = typer.Option(None, help='Base build dir for virtual analysis diff'),
     lru_docs: Optional[str] = typer.Option(None, help='Dir with LRU PDF/DOCX documents'),
+    standards_file: Optional[str] = typer.Option(None, help='Path to custom DAL standards YAML/JSON/PDF/DOCX file'),
     config: str = typer.Option('config.yaml', help='Path to config.yaml'),
     output_format: str = typer.Option('docx', help='Output format: docx or markdown'),
 ) -> None:
     """Run all four DO-178C analyses and generate §11-compliant reports."""
     cfg = load_config(config)
     logger.info(f"RAG Engine — DAL {cfg.dal_level}, output: {cfg.output_dir}")
+    if standards_file:
+        if not Path(standards_file).expanduser().exists():
+            typer.echo(f"Standards file not found: {standards_file}", err=True)
+            raise typer.Exit(1)
+        cfg.standards_file = standards_file
 
     reader = CodeReader(cache_dir=cfg.cache_dir)
     current_results = reader.read_directory(codebase)
@@ -151,7 +157,6 @@ def validate_config(config: str = typer.Option('config.yaml')) -> None:
     """Validate configuration file."""
     cfg = load_config(config)
     typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
-
 
 if __name__ == '__main__':
     app()

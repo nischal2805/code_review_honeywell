@@ -60,6 +60,7 @@ python main.py analyze /path/to/current_build \
 | `--base-build` | same as codebase | Base build directory for virtual function diff |
 | `--lru-docs` | none | Directory containing LRU PDF/DOCX specification documents |
 | `--config` | `config.yaml` | Path to configuration file |
+| `--standards-file` | none | Optional custom standards file (`.yaml`, `.json`, `.pdf`, `.docx`, `.txt`) |
 | `--output-format` | `docx` | Output format: `docx` or `markdown` |
 
 ### Output
