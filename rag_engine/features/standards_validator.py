@@ -1,10 +1,16 @@
 from __future__ import annotations
+import copy
 import re
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any, Dict, List
 from loguru import logger
 
 from rag_engine.config import Config
+from rag_engine.knowledge_base.standards_profile import (
+    deep_merge,
+    load_raw_standards_profile,
+    resolve_standards_profile,
+)
 from rag_engine.models import FunctionDef, ParseResult, Violation
 
 
@@ -37,6 +43,7 @@ class StandardsValidator:
         self._cfg = config
         self._results = parse_results
         self._all_funcs: List[FunctionDef] = [fn for r in parse_results.values() for fn in r.functions]
+        self._rules = self._load_rules()
 
     def analyze(self) -> ComplianceReport:
         violations: List[Violation] = []
@@ -60,58 +67,117 @@ class StandardsValidator:
                                 total_functions_checked=total, violations_by_severity=by_sev,
                                 corrections=corrections)
 
+    def _load_rules(self) -> Dict[str, Any]:
+        profile = copy.deepcopy(self._cfg.standards_profile)
+        if self._cfg.standards_file:
+            try:
+                profile = deep_merge(profile, load_raw_standards_profile(self._cfg.standards_file))
+            except FileNotFoundError:
+                logger.warning(f"Standards profile not found: {self._cfg.standards_file} — using defaults")
+            except Exception as exc:
+                logger.warning(f"Failed to load standards profile {self._cfg.standards_file}: {exc} — using defaults")
+        return resolve_standards_profile(
+            profile,
+            cyclomatic_complexity_max=self._cfg.cyclomatic_complexity_max,
+            function_length_max=self._cfg.function_length_max,
+            nesting_depth_max=self._cfg.nesting_depth_max,
+            param_count_max=self._cfg.param_count_max,
+        )
+
+    @staticmethod
+    def _policy_to_violation_severity(policy: str, default: str = 'MAJOR') -> str:
+        normalized = policy.upper().strip()
+        if normalized == 'FORBIDDEN':
+            return 'CRITICAL'
+        if normalized == 'RESTRICTED':
+            return 'MAJOR'
+        if normalized == 'ALLOWED':
+            return 'MINOR'
+        return default
+
     def _check_naming(self, fn: FunctionDef) -> List[Violation]:
-        if fn.name and fn.name[0].isupper() and not fn.name.startswith('~'):
+        naming = self._rules.get('naming_conventions', {})
+        function_rule = naming.get('function', {}) if isinstance(naming, dict) else {}
+        pattern = function_rule.get('regex', r'^[A-Z][a-zA-Z0-9]*$')
+        if not re.match(pattern, fn.name):
+            convention = function_rule.get('convention', 'PascalCase')
             return [Violation(rule='DO178-NAMING', misra_ref=None, file=fn.file_path, line=fn.line_number,
-                              element=fn.name, message=f"'{fn.name}' starts with uppercase", severity='MINOR')]
+                              element=fn.name, message=f"'{fn.name}' does not match {convention}", severity='MINOR')]
         return []
 
     def _check_complexity(self, fn: FunctionDef) -> List[Violation]:
-        cfg = self._cfg
+        dal_rules = self._rules.get('dal_specific_standards', {})
+        dal_cfg = dal_rules.get(self._cfg.dal_level, {}) if isinstance(dal_rules, dict) else {}
+        complexity = dal_cfg.get('complexity', {}) if isinstance(dal_cfg, dict) else {}
+        max_cc = int(complexity.get('cyclomatic_complexity_max', self._cfg.cyclomatic_complexity_max))
+        max_len = int(complexity.get('function_length_max', self._cfg.function_length_max))
+        max_nesting = int(complexity.get('nesting_depth_max', self._cfg.nesting_depth_max))
+        max_params = int(complexity.get('parameter_count_max', self._cfg.param_count_max))
         out = []
-        if fn.cyclomatic_complexity > cfg.cyclomatic_complexity_max:
+        if fn.cyclomatic_complexity > max_cc:
             out.append(Violation(rule='DO178-CC', misra_ref=None, file=fn.file_path, line=fn.line_number,
                                  element=fn.name, severity='MEDIUM',
-                                 message=f"CC={fn.cyclomatic_complexity} > limit {cfg.cyclomatic_complexity_max}"))
-        if fn.line_count > cfg.function_length_max:
+                                 message=f"CC={fn.cyclomatic_complexity} > limit {max_cc}"))
+        if fn.line_count > max_len:
             out.append(Violation(rule='DO178-FUNC-LEN', misra_ref=None, file=fn.file_path, line=fn.line_number,
                                  element=fn.name, severity='MINOR',
-                                 message=f"Length={fn.line_count} > limit {cfg.function_length_max}"))
-        if fn.nesting_depth > cfg.nesting_depth_max:
+                                 message=f"Length={fn.line_count} > limit {max_len}"))
+        if fn.nesting_depth > max_nesting:
             out.append(Violation(rule='DO178-NESTING', misra_ref=None, file=fn.file_path, line=fn.line_number,
                                  element=fn.name, severity='MINOR',
-                                 message=f"Nesting={fn.nesting_depth} > limit {cfg.nesting_depth_max}"))
-        if len(fn.parameters) > cfg.param_count_max:
+                                 message=f"Nesting={fn.nesting_depth} > limit {max_nesting}"))
+        if len(fn.parameters) > max_params:
             out.append(Violation(rule='DO178-PARAM-COUNT', misra_ref=None, file=fn.file_path, line=fn.line_number,
                                  element=fn.name, severity='MINOR',
-                                 message=f"Params={len(fn.parameters)} > limit {cfg.param_count_max}"))
+                                 message=f"Params={len(fn.parameters)} > limit {max_params}"))
         return out
 
     def _check_prohibited(self, fn: FunctionDef) -> List[Violation]:
         out = []
         body = fn.body
+        universal = self._rules.get('universal_standards', {})
+        dal_rules = self._rules.get('dal_specific_standards', {})
+        dal_cfg = dal_rules.get(self._cfg.dal_level, {}) if isinstance(dal_rules, dict) else {}
+        prohibited = dal_cfg.get('severities', {}).get('prohibited_constructs', {}) if isinstance(dal_cfg, dict) else {}
         if re.search(r'\bgoto\b', body):
+            policy = universal.get('prohibited_constructs', {}).get('goto', 'FORBIDDEN') if isinstance(universal, dict) else 'FORBIDDEN'
             out.append(Violation(rule='DO178-GOTO', misra_ref='MISRA-C++:6-6-1', file=fn.file_path,
-                                 line=fn.line_number, element=fn.name, severity='CRITICAL',
+                                 line=fn.line_number, element=fn.name,
+                                 severity=self._policy_to_violation_severity(policy, 'CRITICAL'),
                                  message=f"'goto' in '{fn.name}' — prohibited by DO-178C"))
         if re.search(r'\b(?:new|delete)\b', body) or re.search(r'\b(?:malloc|calloc|realloc|free)\s*\(', body):
+            policy = prohibited.get('dynamic_memory', 'FORBIDDEN')
             out.append(Violation(rule='DO178-DYNAMIC-MEM', misra_ref=None, file=fn.file_path,
-                                 line=fn.line_number, element=fn.name, severity='CRITICAL',
-                                 message=f"Dynamic memory in '{fn.name}' — prohibited post-init"))
+                                 line=fn.line_number, element=fn.name,
+                                 severity=self._policy_to_violation_severity(policy, 'CRITICAL'),
+                                 message=f"Dynamic memory in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if re.search(r'\b(?:try|catch)\b', body):
+            policy = prohibited.get('exceptions', 'FORBIDDEN')
             out.append(Violation(rule='DO178-EXCEPTION', misra_ref='MISRA-C++:15-0-1', file=fn.file_path,
-                                 line=fn.line_number, element=fn.name, severity='MAJOR',
-                                 message=f"Exception handling in '{fn.name}' — requires justification"))
+                                 line=fn.line_number, element=fn.name,
+                                 severity=self._policy_to_violation_severity(policy, 'MAJOR'),
+                                 message=f"Exception handling in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if fn.name in fn.calls:
+            policy = prohibited.get('recursion', 'FORBIDDEN')
             out.append(Violation(rule='DO178-RECURSION', misra_ref=None, file=fn.file_path,
-                                 line=fn.line_number, element=fn.name, severity='MAJOR',
-                                 message=f"Recursive call in '{fn.name}' — stack depth must be bounded"))
+                                 line=fn.line_number, element=fn.name,
+                                 severity=self._policy_to_violation_severity(policy, 'MAJOR'),
+                                 message=f"Recursive call in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
+        if re.search(r'\b(?:dynamic_cast|typeid)\b', body):
+            policy = prohibited.get('rtti', 'FORBIDDEN')
+            out.append(Violation(rule='DO178-RTTI', misra_ref='MISRA-C++:5-2-2', file=fn.file_path,
+                                 line=fn.line_number, element=fn.name,
+                                 severity=self._policy_to_violation_severity(policy, 'MAJOR'),
+                                 message=f"RTTI in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         return out
 
     def _check_documentation(self, fn: FunctionDef) -> List[Violation]:
         if not fn.docstring:
+            doc_rule = self._rules.get('universal_standards', {}).get('documentation', {})
+            policy = doc_rule.get('missing_docstring', 'MINOR') if isinstance(doc_rule, dict) else 'MINOR'
             return [Violation(rule='DO178-NO-DOCSTRING', misra_ref=None, file=fn.file_path,
-                              line=fn.line_number, element=fn.name, severity='MINOR',
+                              line=fn.line_number, element=fn.name,
+                              severity=self._policy_to_violation_severity(policy, 'MINOR'),
                               message=f"'{fn.name}' has no documentation comment")]
         return []
 
