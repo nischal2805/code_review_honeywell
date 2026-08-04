@@ -3,7 +3,7 @@ output_dir: output
 cache_dir: .rag_cache
 embedding_model: all-MiniLM-L6-v2
 ollama_url: http://localhost:11434
-ollama_model: gpt-oss:20b
+ollama_model: gemma2:2b
 ollama_enabled: true
 max_workers: 4
 entry_points:
