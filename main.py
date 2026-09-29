@@ -73,8 +73,12 @@ def analyze(
     def run_standards():
         return StandardsValidator(cfg, current_results).analyze()
 
-    tasks = {'virtual': run_virtual, 'coupling': run_coupling,
-             'dead_code': run_dead, 'standards': run_standards}
+    tasks = {
+        'virtual': run_virtual,
+        'coupling': run_coupling,
+        'dead_code': run_dead,
+        'standards': run_standards
+}
     results = {}
 
     for name, fn in tqdm(tasks.items(), desc='Analyses'):

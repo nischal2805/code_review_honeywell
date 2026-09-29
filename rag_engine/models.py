@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Literal
 
@@ -39,6 +40,52 @@ class FunctionDef:
     def signature(self) -> str:
         params = ", ".join(f"{p.type_} {p.name}" for p in self.parameters)
         return f"{self.return_type} {self.name}({params})"
+
+    @property
+    def param_types(self) -> List[str]:
+        """Normalised list of parameter types, stripped of qualifiers and spacing.
+
+        Used to build *sig_key* and to match call-site argument types during
+        overload resolution.  Pointer/reference qualifiers are preserved because
+        ``void f(int*)`` and ``void f(int)`` are genuinely different overloads.
+        """
+        return [_normalise_type(p.type_) for p in self.parameters]
+
+    @property
+    def sig_key(self) -> str:
+        """Canonical, overload-discriminating identifier for this function.
+
+        Format:  ``<qualified_name>(<type1>, <type2>, ...)``
+
+        Examples:
+            ``Calculator::compute()``
+            ``Calculator::compute(int)``
+            ``Utils::log(const std::string &)``
+            ``processData()``
+            ``processData(int)``
+
+        This key is used as the node identifier in the call graph and in every
+        dict that maps function identity to a ``FunctionDef``.  Using it instead
+        of the bare ``name`` ensures that overloaded functions are distinct nodes.
+        """
+        return f"{self.name}({', '.join(self.param_types)})"
+
+
+def _normalise_type(raw: str) -> str:
+    """Return a canonical, whitespace-collapsed representation of a C++ type.
+
+    Removes leading/trailing whitespace and collapses internal runs of spaces
+    so that ``"const  std::string &"`` and ``"const std::string&"`` both
+    normalise to ``"const std::string &"``.  A single space is inserted before
+    ``*`` and ``&`` when they immediately follow a non-space character so the
+    representation is predictable regardless of how the parser emitted the type.
+    """
+    t = raw.strip()
+    # Ensure pointer/ref qualifiers are separated by exactly one space.
+    t = re.sub(r'\s*([*&])', r' \1', t)
+    # Collapse any runs of multiple spaces.
+    t = re.sub(r'  +', ' ', t)
+    return t
 
 
 @dataclass

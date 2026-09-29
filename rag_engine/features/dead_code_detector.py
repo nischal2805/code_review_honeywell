@@ -27,32 +27,41 @@ class DeadCodeDetector:
         self._graph = graph_builder
         self._results = parse_results
         self._entry_points = entry_points or ['main']
+        # Keyed by sig_key (e.g. "Calculator::compute(int)") to match the call
+        # graph nodes produced by CallGraphBuilder.  Previously keyed by fn.name,
+        # which collapsed overloads and caused incorrect reachability results.
         self._all_funcs: Dict[str, FunctionDef] = {
-            fn.name: fn for r in parse_results.values() for fn in r.functions
+            fn.sig_key: fn for r in parse_results.values() for fn in r.functions
         }
 
     def analyze(self) -> DeadCodeReport:
         unreachable = self._graph.find_unreachable(self._entry_points)
-        callbacks = {n for n in unreachable if _CALLBACK_PAT.search(n)}
+
+        # Pattern matches run against the short base name only (strip param list)
+        # so that "Calculator::compute()" still matches a pattern on "compute".
+        def _base(sig_key: str) -> str:
+            return sig_key.split('(')[0]
+
+        callbacks = {n for n in unreachable if _CALLBACK_PAT.search(_base(n))}
         unreachable -= callbacks
         exported = {n for n in unreachable if self._all_funcs.get(n) and self._all_funcs[n].is_virtual}
         unreachable -= exported
-        deactivated = {n for n in unreachable if _TEST_PAT.search(n)}
+        deactivated = {n for n in unreachable if _TEST_PAT.search(_base(n))}
         dead = unreachable - deactivated
 
         items: List[DeadCodeItem] = []
-        for name in sorted(dead):
-            fn = self._all_funcs.get(name)
+        for sig_key in sorted(dead):
+            fn = self._all_funcs.get(sig_key)
             if fn:
                 items.append(DeadCodeItem(
-                    name=name, file_path=fn.file_path, line_number=fn.line_number,
+                    name=sig_key, file_path=fn.file_path, line_number=fn.line_number,
                     category='dead_code', do178c_disposition='Remove',
                     coverage_impact=f"~{fn.line_count} lines; {fn.cyclomatic_complexity} decision point(s)"))
-        for name in sorted(deactivated):
-            fn = self._all_funcs.get(name)
+        for sig_key in sorted(deactivated):
+            fn = self._all_funcs.get(sig_key)
             if fn:
                 items.append(DeadCodeItem(
-                    name=name, file_path=fn.file_path, line_number=fn.line_number,
+                    name=sig_key, file_path=fn.file_path, line_number=fn.line_number,
                     category='deactivated_code', do178c_disposition='Justify as Deactivated',
                     coverage_impact=f"~{fn.line_count} lines; {fn.cyclomatic_complexity} decision point(s)"))
 
