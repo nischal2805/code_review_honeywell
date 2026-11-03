@@ -10,16 +10,25 @@
 
 ```
 rag_engine/
+├── pipeline.py             # run_pipeline(): the analysis sequence shared by the CLI and the TUI
+├── models.py               # Core dataclasses (FunctionDef, VirtualChange, Violation, DeadCodeItem, ...)
+├── config.py               # Config + YAML loader (relative paths resolve against the config file's directory)
 ├── core/
 │   ├── parser.py           # C++ → AST via tree-sitter
 │   ├── ast_builder.py      # AST utilities
+│   ├── class_hierarchy.py  # Class tree and virtual override resolution (R1)
 │   ├── graph_builder.py    # Call graph + data flow graph (networkx DiGraph)
 │   └── embeddings.py       # Local FAISS index + sentence-transformer encoding
 ├── features/
-│   ├── virtual_analysis.py     # Feature 1: Virtual function change detection
-│   ├── coupling_analysis.py    # Feature 2: Control/data coupling per LRU
-│   ├── dead_code_detector.py   # Feature 3: Dead/deactivated code classification
-│   └── standards_validator.py  # Feature 4: DO-178C §5.1 + MISRA C++ rule checking
+│   ├── virtual_analysis.py       # Feature 1: Virtual function change detection; R1 inventory
+│   ├── function_effect.py        # R2: a method's reads, writes, calls and coupled components
+│   ├── coupling_analysis.py      # Feature 2: Control/data coupling per LRU
+│   ├── dead_code_detector.py     # Feature 3: Dead/deactivated code classification, finding IDs
+│   ├── control_flow_analyzer.py  # Dead fragments and unused variables (feeds Feature 3)
+│   ├── standards_validator.py    # Feature 4: DO-178C §5.1 + MISRA C++ rule checking
+│   ├── sensor_template.py        # R3: sensor YAML template loader and validation
+│   ├── sensor_analysis.py        # R3: corrupt / stale / debounce checks in the code
+│   └── sensor_data_checker.py    # R3: replay of recorded sensor samples
 ├── document_processor/
 │   ├── code_reader.py      # Parse C++ files
 │   ├── doc_reader.py       # Ingest PDF/DOCX LRU specs
@@ -28,11 +37,18 @@ rag_engine/
 │   ├── index_manager.py    # FAISS index lifecycle
 │   ├── cache_manager.py    # Hash-based incremental cache
 │   └── standards_db.py     # MISRA C++ rules + project rules
+├── llm/
+│   ├── ollama_client.py    # Optional Ollama client
+│   ├── rag_narrator.py     # Optional narrative enrichment of reports
+│   └── offline_qa.py       # R4: facts-first Q&A; the LLM only explains the facts
 ├── reporting/
-│   ├── report_generator.py     # DO-178C §11 reports (PDF/DOCX)
-│   ├── checklist_filler.py     # SQA checklist auto-fill
+│   ├── report_generator.py     # DO-178C §11 reports (DOCX/Markdown) + dead_code_findings.json
+│   ├── checklist_filler.py     # SQA checklist auto-fill (VA-03, DC-*, STD-*, SEN-*)
 │   └── output_formatter.py     # Formatting utilities
-└── main.py                 # CLI entry + parallel orchestration
+├── templates/              # Jinja2 templates, one per report (incl. function_effect, sensor_analysis)
+└── tui/
+    └── app.py              # Textual TUI
+main.py                     # Typer CLI entry (analyze, virtuals, effect, sensors, sensor-check, ask, validate-config)
 ```
 
 ---
@@ -83,12 +99,23 @@ class Violation:
 
 @dataclass
 class DeadCodeItem:
-    name: str
+    name: str                       # sig_key (function), snippet (fragment) or variable name
     file_path: str
     line_number: int
-    category: Literal['dead_code', 'deactivated_code', 'unused_export', 'dead_fragment']
+    category: Literal['dead_code', 'deactivated_code', 'unused_export', 'dead_fragment', 'unused_variable']
     do178c_disposition: Literal['Remove', 'Justify as Deactivated', 'Investigate', 'Fix Fragment']
     coverage_impact: str
+    finding_id: str = ''            # DC-<FUNC|METH|CFG|FRAG|VAR>-<8 hex>; no line numbers in the hash
+    end_line: int = 0
+    symbol_type: Literal['function', 'method', 'fragment', 'variable', 'parameter'] = 'function'
+    function_name: Optional[str] = None   # sig_key of the function the finding is (in)
+    reason: str = ''
+    confidence: Literal['high', 'medium', 'low'] = 'medium'
+    evidence: List[str] = field(default_factory=list)
+    removal_impact: List[str] = field(default_factory=list)
+    review_status: str = 'open'     # from the dispositions YAML: findings: {<id>: {status, justification, reviewer}}
+    reviewer_justification: Optional[str] = None
+    reviewer: Optional[str] = None
 ```
 
 ---
@@ -179,6 +206,9 @@ def analyze(self) -> DeadCodeReport:
 # deactivated_code    → 'Justify as Deactivated'
 # unused_export       → 'Investigate'
 # dead_fragment       → 'Fix Fragment'
+# unused_variable     → 'Remove' (local) / 'Investigate' (parameter)
+# finding ID = first 8 hex digits of SHA-1(file name | symbol | kind | detail); line numbers are not hashed;
+# identical findings get a #n order suffix before hashing; the dispositions file sets review_status only
 ```
 
 ---
@@ -203,19 +233,32 @@ def analyze(self) -> ComplianceReport:
 
 ---
 
-## Execution Pipeline (main.py)
+### P2 additions (one line each)
+- **R1 `ClassHierarchy` and `VirtualAnalyzer.inventory`** (core/class_hierarchy.py, features/virtual_analysis.py): virtual inventory, overrides, reachability, call sites, class trees; `virtuals` command.
+- **R2 `FunctionEffectAnalyzer`** (features/function_effect.py): one method's reads, writes, calls, callers and coupled components, with no numeric score; `effect` command.
+- **R3 `load_sensor_templates`** (features/sensor_template.py): YAML template to `SensorTemplate`; rejects unknown keys; used by `sensors` and `sensor-check`.
+- **R3 `SensorAnalyzer`** (features/sensor_analysis.py): finds corrupt / stale / debounce code per template class; statuses implemented, mismatch, missing.
+- **R3 `check_samples`** (features/sensor_data_checker.py): replays `sensor,timestamp_ms,value` samples through the template rules.
+- **Dead fragments and unused variables** (features/control_flow_analyzer.py): `find_dead_fragments`, `find_unused_variables`; consumed by `DeadCodeDetector`.
+- **R4 `answer_question`** (llm/offline_qa.py): facts first, not-found with close names, optional LLM explanation; used by the `ask` command and the TUI chat.
+- **`run_pipeline`** (pipeline.py): the single analysis sequence for the CLI and the TUI; raises `InputError` for bad input.
+
+---
+
+## Execution Pipeline (pipeline.py, called by main.py and the TUI)
 
 ```python
-# 1. Load config (DAL level, code standard rules, output dir)
-# 2. Init knowledge base: load all-MiniLM-L6-v2 offline, build FAISS index, load standards DB
-# 3. Parse codebase: CodeParser.parse_directory() → build call graph + data flow graph
-# 4. Run features in parallel (ProcessPoolExecutor, max_workers=4):
-#    Feature 1: VirtualAnalyzer(base, current).analyze()
-#    Feature 2: CouplingAnalyzer(parse_results, lru_docs).analyze()
-#    Feature 3: DeadCodeDetector(call_graph, parse_results).analyze()
-#    Feature 4: StandardsValidator(rules, parse_results).analyze()
-# 5. ReportGenerator: populate DO-178C §11 Jinja2 templates → PDF/DOCX
-# 6. ChecklistFiller: auto-fill SQA checklists; write to config-controlled output dir
+# 1. Load config (DAL, thresholds, output dir); load and validate sensor templates (InputError on bad input)
+# 2. Parse C++ files (CodeReader with incremental cache) → CodeParser → CallGraphBuilder
+# 3. Semantic search index (optional; keyword matching when sentence-transformers cannot be imported)
+# 4. Analyses, in sequence:
+#    VirtualAnalyzer(base, current, ...).analyze()
+#    DeadCodeDetector(graph, results, entry_points, entry_point_patterns, dispositions).analyze()
+#    StandardsValidator(cfg, results).analyze()
+#    CouplingAnalyzer(parse_results, graph, search, lru_docs).analyze()
+#    SensorAnalyzer(parse_results, graph, templates).analyze()   # only when sensor_templates_file is set
+# 5. LLM narratives via Ollama (optional; only when reports are written)
+# 6. ReportGenerator: DOCX/Markdown reports + dead_code_findings.json; ChecklistFiller: sqa_checklist.md
 ```
 
 ---
@@ -233,12 +276,14 @@ class AnalysisCache:
 
 ---
 
-## Risk Scoring
+## LRU Coupling Risk
 
 ```python
-# risk_score = (impact × complexity × likelihood) / max(mitigation, 0.1)  — capped at 1.0
-# impact      = (affected_lrus / total_lrus + affected_functions / total_funcs) / 2
-# Used to prioritize reverification scope in Feature 1 output
+# coupling_analysis.py CouplingAnalyzer._analyze_lru: a level, not a numeric score
+# control = related functions that call something or are virtual; data = "function -> global" pairs
+# risk_level = 'high'   if len(control) > 5 or len(data) > 5
+#              'medium' if len(control) > 2 or len(data) > 2
+#              'low'    otherwise
 ```
 
 ---
@@ -255,6 +300,9 @@ jinja2               # Template rendering
 pypdf                # PDF input (LRU docs)
 loguru               # Structured logging
 tqdm                 # Progress bars
+typer                # CLI (main.py)
+textual              # TUI (rag_engine/tui)
+pyyaml               # Config, sensor templates, dead-code dispositions
 # External (project-configured): clang-tidy (MISRA C++ checking), gcov/llvm-cov (structural coverage)
 ```
 
