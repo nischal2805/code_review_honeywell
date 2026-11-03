@@ -786,3 +786,74 @@ def test_unexpected_error_names_its_type_and_is_logged(tui_config, monkeypatch, 
         assert any('RuntimeError: boom [i]' in n.message for n in app._notifications)
     _run_app(scenario)
     assert any(r['message'] == 'TUI analysis failed' and r['exception'].type is RuntimeError for r in logged)
+
+
+def _sink_ids() -> set:
+    return set(logger._core.handlers)       # loguru offers no public listing
+
+
+def test_the_tui_logs_to_a_file_instead_of_stderr_and_restores_stderr_on_exit(tui_config):
+    before = _sink_ids()
+    stderr_sink = tui_app._stderr_sink
+    if stderr_sink not in before:
+        pytest.skip('loguru default stderr sink was removed by the host')
+
+    async def scenario(app, pilot):
+        assert stderr_sink not in _sink_ids() and len(_sink_ids()) == len(before)   # stderr out, file in
+        logger.warning('marker written while the TUI runs')
+    _run_app(scenario)
+
+    assert tui_app._stderr_sink in _sink_ids() and len(_sink_ids()) == len(before)
+    log = Path(tui_config.cache_dir) / 'tui.log'
+    assert 'marker written while the TUI runs' in log.read_text(encoding='utf-8')
+
+
+def test_the_tui_still_starts_when_the_log_file_cannot_be_created(tui_config, tmp_path, monkeypatch):
+    blocker = tmp_path / 'not-a-dir'
+    blocker.write_text('x')
+    tui_config.cache_dir = str(blocker)
+    before = len(_sink_ids())
+
+    async def scenario(app, pilot):
+        assert isinstance(app.screen, ConfigScreen)
+        assert any('log file' in n.message for n in app._notifications)
+    _run_app(scenario)
+    assert len(_sink_ids()) == before
+
+
+def test_chat_probe_result_does_not_overwrite_thinking_while_an_answer_is_pending(results):
+    probe_gate, answer_started, release_answer = threading.Event(), threading.Event(), threading.Event()
+
+    class SlowOllama:
+        def is_available(self):
+            assert probe_gate.wait(20)
+            return True
+
+    def fake_ask(question):
+        answer_started.set()
+        assert release_answer.wait(20)
+        return 'done'
+
+    async def scenario(app, screen, pilot):
+        screen._ask = fake_ask
+        status, shown = screen.query_one('#chat-status', Static), []
+        real_update = screen._update_status
+        screen._update_status = lambda thinking=False: (real_update(thinking), shown.append(str(status.content)))
+        chat = screen.query_one('#chat-input', Input)
+        chat.focus()
+        chat.value = 'question?'
+        await pilot.press('enter')
+        await _wait_until(pilot, answer_started.is_set)
+        seen = len(shown)
+        probe_gate.set()                                 # the availability probe finishes while the answer is pending
+        await _wait_until(pilot, lambda: len(shown) > seen)
+        assert screen._ollama_ready is True and 'Thinking' in shown[-1]
+        release_answer.set()
+        await _wait_until(pilot, lambda: 'Ollama ready' in str(status.content))
+    screen = ChatScreen(results, Config(ollama_enabled=True))
+    screen._ollama = SlowOllama()
+    try:
+        _drive(screen, scenario)
+    finally:
+        probe_gate.set()
+        release_answer.set()

@@ -65,9 +65,10 @@ def load_samples_csv(path: str | Path) -> Dict[str, List[Sample]]:
     """Read a `sensor,timestamp_ms,value` CSV into per-sensor sample lists (file order).
 
     Raises ValueError, naming the line, for a missing column, a short or blank row, a non-numeric value or
-    a field the csv module refuses (larger than its 128 KB field limit, NUL bytes)."""
+    a field the csv module refuses (larger than its 128 KB field limit, NUL bytes) or text that is not UTF-8
+    (a leading BOM, as Excel writes, is accepted)."""
     samples: Dict[str, List[Sample]] = {}
-    with Path(path).expanduser().open(newline='', encoding='utf-8') as f:
+    with Path(path).expanduser().open(newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         try:
             if not {'sensor', 'timestamp_ms', 'value'} <= set(reader.fieldnames or []):
@@ -80,6 +81,8 @@ def load_samples_csv(path: str | Path) -> Dict[str, List[Sample]]:
                     samples.setdefault(sensor, []).append((float(row['timestamp_ms']), float(row['value'])))
                 except (AttributeError, TypeError, ValueError) as exc:
                     raise ValueError(f'{path}:{reader.line_num}: bad sample row {row!r}') from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError(f'{path}: not UTF-8 text ({exc.reason} at byte {exc.start})') from exc
         except csv.Error as exc:
             raise ValueError(f'{path}:{reader.line_num + 1}: {exc}') from exc   # line_num lags: the bad record is the next
     return samples

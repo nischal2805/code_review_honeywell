@@ -517,3 +517,101 @@ def test_report_distinguishes_not_configured_from_not_required(tmp_path):
     assert re.search(r'\| stale \| not_configured \| no stale threshold configured \|', text)
     assert re.search(r'\| debounce \| not_required \| debounce disabled \|', text)
     assert 'Not configured in the template: stale' in text
+
+
+# ── Final review: checks are credited per sensor ────────────────────────────────
+
+TWO_SENSOR_HEADER = '''
+class TempSensor { public: float read(); unsigned long lastMs = 0; };
+class PresSensor { public: float read(); unsigned long lastMs = 0; };
+class Mgr {
+public:
+    void poll(unsigned long nowMs);
+private:
+    TempSensor temp;
+    PresSensor pres;
+    float t_ = 0;
+    float p_ = 0;
+    unsigned long lastMs = 0;
+};
+'''
+
+TWO_SENSOR_TEMPLATES = (SensorTemplate(name='TempSensor', valid_min=0, valid_max=110000, stale_threshold_ms=500,
+                                       debounce_enabled=False),
+                        SensorTemplate(name='PresSensor', valid_min=0, valid_max=110000, stale_threshold_ms=500,
+                                       debounce_enabled=False))
+
+
+def _poll(tmp_path, body: str):
+    (tmp_path / 's.h').write_text(TWO_SENSOR_HEADER)
+    (tmp_path / 's.cpp').write_text(
+        '#include "s.h"\nfloat TempSensor::read() { return 1.0f; }\nfloat PresSensor::read() { return 2.0f; }\n'
+        f'void Mgr::poll(unsigned long nowMs) {{\n{body}\n}}\nint main() {{ Mgr m; m.poll(5); return 0; }}\n')
+    temp, pres = _analyze(CodeParser().parse_directory(str(tmp_path)), list(TWO_SENSOR_TEMPLATES)).findings
+    return temp, pres
+
+
+def test_a_processor_reading_two_sensors_credits_each_check_to_its_own_sensor(tmp_path):
+    temp, pres = _poll(tmp_path, '''
+    t_ = temp.read();
+    p_ = pres.read();
+    if (nowMs - pres.lastMs > 500) { p_ = 0; }
+    if (p_ < 0 || p_ > 110000) { p_ = 0; }''')
+    assert temp.checks['corrupt'].status == 'missing' and temp.checks['corrupt'].evidence == []
+    assert temp.checks['stale'].status == 'missing' and temp.checks['stale'].evidence == []
+    assert pres.checks['corrupt'].status == 'implemented'
+    assert pres.checks['stale'].status == 'implemented'
+    assert any('pres.lastMs > 500' in e for e in pres.checks['stale'].evidence)
+
+
+def test_a_source_call_inside_the_comparison_counts_for_the_sensor_it_resolves_to(tmp_path):
+    temp, pres = _poll(tmp_path, '    if (temp.read() > 110000.0f || temp.read() < 0.0f) { t_ = 0; }')
+    assert temp.checks['corrupt'].status == 'implemented'
+    assert pres.checks['corrupt'].status == 'missing'
+
+
+def test_a_member_name_without_the_sensors_receiver_is_not_sensor_data(tmp_path):
+    temp, pres = _poll(tmp_path, '''
+    t_ = temp.read();
+    if (nowMs - lastMs > 500) { t_ = 0; }
+    if (nowMs - temp.lastMs > 500) { t_ = 0; }''')
+    assert temp.checks['stale'].status == 'implemented'
+    assert [e.rsplit(': ', 1)[1] for e in temp.checks['stale'].evidence] == ['nowMs - temp.lastMs > 500']
+
+
+def test_dispatch_through_a_base_pointer_reaches_the_overriding_sensor(tmp_path):
+    src = '''
+class Sensor { public: virtual float read() = 0; };
+class Probe : public Sensor { public: float read() override { return 1.0f; } };
+class Mgr {
+public:
+    void run(Sensor* s) { float v = s->read(); if (v > 9.0f) { } }
+    void go() { run(&p); }
+private:
+    Probe p;
+};
+'''
+    f = _probe(tmp_path, src, valid_max=9.0)
+    assert 'Mgr::run(Sensor *)' in _keys(f.processors)
+    assert f.checks['corrupt'].status == 'implemented' and f.checks['corrupt'].found == [9.0]
+
+
+def test_a_for_loop_counter_is_never_a_stale_or_debounce_check(tmp_path):
+    src = ('class Probe { public: float read() { return 0; } void wait() {'
+           ' for (int tick = 0; tick < 500; ++tick) { } for (int delta = 0; delta < 2; ++delta) { } } };')
+    f = _probe(tmp_path, src, stale_threshold_ms=500, debounce_threshold=2)
+    assert f.checks['stale'].status == 'missing'
+    assert f.checks['debounce'].status == 'missing'
+
+
+def test_a_pure_virtual_destructor_does_not_make_derived_sensors_abstract(tmp_path):
+    (tmp_path / 'probe.cpp').write_text(
+        'class Sensor { public: virtual ~Sensor() = 0; virtual float read() = 0; };\n'
+        'Sensor::~Sensor() {}\n'
+        'class FuelSensor : public Sensor { public: float read() override { return 1; } };\n')
+    parsed = CodeParser().parse_directory(str(tmp_path))
+    gb = CallGraphBuilder(parsed)
+    gb.build()
+    gb.hierarchy.methods['Sensor::~Sensor()'].is_pure = True     # however the parser reports `= 0` on a destructor
+    result = SensorAnalyzer(parsed, gb, [SensorTemplate(name='Other')]).analyze()
+    assert result.unmapped_sensor_classes == ['FuelSensor']

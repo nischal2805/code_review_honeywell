@@ -4,10 +4,11 @@ import json
 os.environ.setdefault('USE_TF', '0')
 os.environ.setdefault('USE_TORCH', '1')
 
+import sys
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 from rich.text import Text
@@ -35,6 +36,9 @@ from rag_engine.llm.offline_qa import answer_question, function_names, not_found
 from rag_engine.llm.ollama_client import OllamaClient
 from rag_engine.llm.rag_narrator import RAGNarrativeGenerator
 from rag_engine.pipeline import AnalysisResults, InputError, run_pipeline   # AnalysisResults: screens and tests import it from here
+
+
+_stderr_sink = 0   # loguru's default stderr sink; a new id once the TUI has put it back
 
 
 def _t(value: Any, style: str = '') -> Text:
@@ -887,7 +891,7 @@ class ChatScreen(Screen):
         self.app.call_from_thread(self._update_status)
 
     def _update_status(self, thinking: bool = False) -> None:
-        if thinking:
+        if thinking or self._answering:   # an answer in flight keeps "Thinking…" whatever else updates the status
             text = _t("Thinking…", "dim")
         elif not self._cfg.ollama_enabled:
             text = _t("Ollama disabled in config: using structured offline answers", "yellow")
@@ -973,8 +977,45 @@ class RAGEngineApp(App):
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._restore_logging: Callable[[], None] = lambda: None
+
     def on_mount(self) -> None:
+        self._restore_logging = self._log_to_file()
         self.push_screen(ConfigScreen())
+
+    def on_unmount(self) -> None:
+        self._restore_logging()
+
+    def _log_to_file(self) -> Callable[[], None]:
+        """Textual owns the terminal, so loguru's stderr sink would draw over the screen: log to
+        ``<cache_dir>/tui.log`` while the app runs.  Returns the function that puts stderr back."""
+        try:
+            cache_dir = load_config().cache_dir
+        except Exception:      # a broken config.yaml is reported by the analysis, not by the logging set-up
+            cache_dir = Config().cache_dir
+        try:
+            logger.remove(_stderr_sink)
+            stderr_removed = True
+        except ValueError:     # the host program already removed it
+            stderr_removed = False
+        file_sink: Optional[int] = None
+        path = Path(cache_dir).expanduser() / 'tui.log'
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_sink = logger.add(path, level='DEBUG', encoding='utf-8', rotation='5 MB', retention=3)
+        except OSError as exc:
+            self.notify(f"Cannot write the log file {path}: {exc}; log output is discarded",
+                        severity="warning", timeout=10, markup=False)
+
+        def restore() -> None:
+            global _stderr_sink
+            if file_sink is not None:
+                logger.remove(file_sink)
+            if stderr_removed:
+                _stderr_sink = logger.add(sys.stderr)
+        return restore
 
 
 def launch() -> None:

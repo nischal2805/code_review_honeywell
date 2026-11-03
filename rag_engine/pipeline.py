@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import yaml
 from loguru import logger
 
 from rag_engine.config import Config
@@ -60,8 +61,13 @@ def _semantic_search(cfg: Config, functions: List[FunctionDef]) -> Any:
 def _load_templates(path: str) -> List[SensorTemplate]:
     try:
         return load_sensor_templates(path)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, 'problem_mark', None)
+        raise InputError(f"Sensor templates {path}{f':{mark.line + 1}' if mark else ''}: invalid YAML "
+                         f"({getattr(exc, 'problem', None) or exc})") from exc
     except (ValueError, OSError) as exc:
-        raise InputError(f"Sensor templates {path}: {exc}") from exc
+        text = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        raise InputError(f"Sensor templates {path}: {text.removeprefix(f'{path}: ')}") from exc
 
 
 def _narrative_tasks(cfg: Config, r: AnalysisResults) -> Dict[str, Tuple[str, str, int]]:

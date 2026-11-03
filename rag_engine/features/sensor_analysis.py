@@ -62,6 +62,9 @@ class SensorAnalysisResult:
     unmapped_sensor_classes: List[str] = field(default_factory=list)
 
 
+_Call = Tuple[str, int, Optional[str]]   # (short callee name, absolute line, receiver) as CallSite names them
+
+
 @dataclass(frozen=True)
 class _Comparison:
     line: int
@@ -69,14 +72,14 @@ class _Comparison:
     kind: Literal['range', 'stale', 'debounce']
     values: Tuple[float, ...]            # the numeric constants among the two operands
     operands: FrozenSet[str]             # identifiers of the non-constant operand
-    calls: FrozenSet[str]                # short names of functions called in the non-constant operand
+    calls: FrozenSet[_Call]              # functions called in the non-constant operand
     in_for_condition: bool
 
 
 @dataclass
 class _Facts:
     comparisons: List[_Comparison]
-    assigned: Dict[str, Set[str]]        # variable -> short names of functions called in the values assigned to it
+    assigned: Dict[str, Set[_Call]]      # variable -> functions called in the values assigned to it
 
 
 def _fmt(x: float) -> str:
@@ -149,9 +152,26 @@ def _callee_name(call: Node, src: bytes) -> str:
     return m.group(1) if m else ''
 
 
-def _called_names(node: Optional[Node], src: bytes) -> Set[str]:
+def _call_of(call: Node, src: bytes, first_line: int) -> Optional[_Call]:
+    """``s.read()`` -> ``('read', <line of s>, 's')``: the keys under which the call graph records the call site."""
+    callee, name = call.child_by_field_name('function'), _callee_name(call, src)
+    if callee is None or not name:
+        return None
+    start, receiver = callee, None
+    if callee.type == 'field_expression':
+        obj = callee.child_by_field_name('argument')
+        while obj is not None and obj.type == 'subscript_expression':
+            obj = obj.child_by_field_name('argument')
+        if obj is not None and obj.type == 'field_expression':
+            obj = obj.child_by_field_name('field')
+        if obj is not None and obj.type in ('identifier', 'field_identifier'):
+            start, receiver = obj, get_text(obj, src)
+    return name, first_line + start.start_point[0], receiver
+
+
+def _calls_in(node: Optional[Node], src: bytes, first_line: int) -> Set[_Call]:
     calls = find_nodes(node, 'call_expression') if node is not None else []
-    return {n for n in (_callee_name(c, src) for c in calls) if n}
+    return {c for c in (_call_of(n, src, first_line) for n in calls) if c}
 
 
 def _has_abs_of_difference(node: Node, src: bytes) -> bool:
@@ -201,6 +221,7 @@ class SensorAnalyzer:
         self._consts: Dict[str, float] = {}
         self._facts: Dict[str, _Facts] = {}                  # sig_key -> comparisons etc., filled lazily
         self._families: List[Set[str]] = []                  # of the matched sensors
+        self._sites: Dict[str, Dict[Tuple[int, Optional[str]], Set[str]]] = {}   # caller -> (line, receiver) -> targets
 
     def analyze(self) -> SensorAnalysisResult:
         if not self._gb.built:
@@ -211,6 +232,10 @@ class SensorAnalyzer:
             self._methods.setdefault(info.class_name, []).append(info)
         self._consts = self._collect_constants()
         self._families = []
+        self._sites = {}
+        for site in self._gb.call_sites:
+            if site.call_type != 'unresolved':      # a fan-out over same-named functions resolves nothing
+                self._sites.setdefault(site.caller, {}).setdefault((site.line, site.receiver), set()).add(site.target)
         findings = [self._analyze_template(t) for t in self._templates]
         unmapped = self._unmapped(findings)
         logger.info(f"Sensor analysis: {sum(f.status == 'found' for f in findings)}/{len(findings)} "
@@ -303,7 +328,7 @@ class SensorAnalyzer:
         finding.validators = [self._entry(k) for k in validators]
         finding.consumers = [self._entry(k) for k in consumers]
         scope = self._unique(visible + processors + validators)
-        finding.checks = self._checks(finding, scope, {self._short(s) for s in sources})
+        finding.checks = self._checks(finding, scope, sources)
 
     @staticmethod
     def _unique(items) -> List[str]:
@@ -314,9 +339,9 @@ class SensorAnalyzer:
 
     # ── Checks ──────────────────────────────────────────────────────────────
 
-    def _checks(self, finding: SensorFinding, scope: List[str], source_names: Set[str]) -> Dict[str, CheckResult]:
+    def _checks(self, finding: SensorFinding, scope: List[str], sources: List[str]) -> Dict[str, CheckResult]:
         tpl = finding.template
-        hits = self._hits(scope, set(finding.data_members), source_names)
+        hits = self._hits(finding, scope, sources)
         bounds = [b for b in (tpl.valid_min, tpl.valid_max) if b is not None]
         low = _fmt(tpl.valid_min) if tpl.valid_min is not None else '-inf'
         high = _fmt(tpl.valid_max) if tpl.valid_max is not None else 'inf'
@@ -340,21 +365,51 @@ class SensorAnalyzer:
             debounce_check = self._check(hits['debounce'], [debounce], f'threshold {_fmt(debounce)}')
         return {'corrupt': corrupt, 'stale': stale_check, 'debounce': debounce_check}
 
-    def _hits(self, scope: List[str], data: Set[str],
-              source_names: Set[str]) -> Dict[str, List[Tuple[str, _Comparison]]]:
-        """Comparisons per kind.  A range comparison counts only when its non-constant operand is
-        sensor data: a data member, a parameter, a variable assigned from a source call, or a source
-        call itself; a ``for`` condition never counts."""
+    def _reaching(self, cls: str, sources: List[str]) -> Set[str]:
+        """Call-site targets that run one of *sources* for *cls*: the sources themselves and the virtual
+        methods of *cls* or its ancestors whose final overrider in *cls* is a source (a call through a base)."""
+        h = self._gb.hierarchy
+        mine = {cls, *h.ancestors(cls)}
+        return set(sources) | {k for k, info in h.methods.items() if info.is_virtual and info.class_name in mine
+                               and h.find_method(cls, info.short_name, info.param_types) in sources}
+
+    def _hits(self, finding: SensorFinding, scope: List[str],
+              sources: List[str]) -> Dict[str, List[Tuple[str, _Comparison]]]:
+        """Comparisons per kind that concern *this* sensor.  Sensor data is a variable assigned from a call
+        site that resolves to one of the sensor's sources, a source call written in the comparison, or the
+        receiver of such a call (``temp`` in ``temp.lastMs``).  A range comparison also counts on a parameter
+        and, in the sensor's own methods, on a data member.  In the sensor's own methods every stale and
+        debounce comparison counts; elsewhere it needs sensor data.  A ``for`` condition never counts."""
+        h = self._gb.hierarchy
+        cls = finding.class_name or ''
+        mine = {cls, *h.ancestors(cls)}
+        reach = self._reaching(cls, sources)
+        data = set(finding.data_members)
         hits: Dict[str, List[Tuple[str, _Comparison]]] = {'range': [], 'stale': [], 'debounce': []}
         for sig_key in scope:
             facts = self._facts_of(sig_key)
-            sensor_data = (data | {p.name for p in self._funcs[sig_key].parameters if p.name}
-                           | {v for v, called in facts.assigned.items() if called & source_names})
+            sites = self._sites.get(sig_key, {})
+            own = sig_key in h.methods and h.methods[sig_key].class_name in mine
+
+            def from_source(call: _Call) -> bool:
+                name, line, receiver = call
+                return any(t in reach and t.split('(')[0].rsplit('::', 1)[-1] == name
+                           for t in sites.get((line, receiver), ()))
+
+            receivers = {r for (_, r), targets in sites.items() if r and targets & reach}
+            sensor_data = receivers | {v for v, calls in facts.assigned.items() if any(map(from_source, calls))}
             for cmp in facts.comparisons:
-                if cmp.kind == 'range' and (
-                        cmp.in_for_condition or not (cmp.operands & sensor_data or cmp.calls & source_names)):
+                if cmp.in_for_condition:
                     continue
-                hits[cmp.kind].append((sig_key, cmp))
+                refers = bool(cmp.operands & sensor_data) or any(map(from_source, cmp.calls))
+                if cmp.kind == 'range':
+                    # shortcut: a range operand is a parameter or member by name, not by data flow from the caller.
+                    refers = refers or bool(cmp.operands & ({p.name for p in self._funcs[sig_key].parameters if p.name}
+                                                            | (data if own else set())))
+                elif own:
+                    refers = True
+                if refers:
+                    hits[cmp.kind].append((sig_key, cmp))
         return hits
 
     def _check(self, hits: List[Tuple[str, _Comparison]], required: List[float], expected: str) -> CheckResult:
@@ -395,13 +450,13 @@ class SensorAnalyzer:
                 line=first_line + node.start_point[0], text=' '.join(get_text(node, src).split()),
                 kind=_classify(node, src), values=tuple(v for v in values if v is not None),
                 operands=frozenset(i for s in variable for i in _identifiers(s, src)),
-                calls=frozenset(n for s in variable for n in _called_names(s, src)),
+                calls=frozenset(c for s in variable for c in _calls_in(s, src, first_line)),
                 in_for_condition=_in_for_condition(node)))
 
-        assigned: Dict[str, Set[str]] = {}
+        assigned: Dict[str, Set[_Call]] = {}
 
         def record(name: str, value: Optional[Node]) -> None:
-            called = _called_names(value, src)
+            called = _calls_in(value, src, first_line)
             if name and called:
                 assigned.setdefault(name, set()).update(called)
 
@@ -458,6 +513,8 @@ class SensorAnalyzer:
         h = self._gb.hierarchy
         for c in [cls] + h.ancestors(cls):
             for info in self._methods.get(c, []):
+                if info.short_name.startswith('~'):      # a pure destructor still gets a body
+                    continue
                 nearest = h.find_method(cls, info.short_name, info.param_types) if info.is_pure else None
                 if nearest and h.methods[nearest].is_pure:
                     return True

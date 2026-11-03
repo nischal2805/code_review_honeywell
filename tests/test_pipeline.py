@@ -167,3 +167,23 @@ def test_bad_sensor_templates_are_reported_as_input_errors_before_any_parsing(tm
         with pytest.raises(InputError, match=message) as excinfo:
             run_pipeline(cfg, str(SENSORS), use_semantic_search=False, write_reports=False)
         assert str(path) in str(excinfo.value)
+
+
+def test_template_file_with_a_yaml_syntax_error_is_an_input_error_naming_the_file_once(tmp_path):
+    bad = tmp_path / 'broken.yaml'
+    bad.write_text('sensors:\n  - name: S\n    valid_range: {min: 1\n', encoding='utf-8')
+    cfg = _cfg(tmp_path)
+    cfg.sensor_templates_file = str(bad)
+    with pytest.raises(InputError) as excinfo:
+        run_pipeline(cfg, str(SENSORS), use_semantic_search=False, write_reports=False)
+    assert str(excinfo.value).count(str(bad)) == 1 and 'YAML' in str(excinfo.value)
+
+
+def test_template_error_messages_do_not_repeat_the_path(tmp_path):
+    empty = tmp_path / 'empty.yaml'
+    empty.write_text('sensors: []\n', encoding='utf-8')
+    cfg = _cfg(tmp_path)
+    cfg.sensor_templates_file = str(empty)
+    with pytest.raises(InputError, match='no sensors defined') as excinfo:
+        run_pipeline(cfg, str(SENSORS), use_semantic_search=False, write_reports=False)
+    assert str(excinfo.value).count(str(empty)) == 1

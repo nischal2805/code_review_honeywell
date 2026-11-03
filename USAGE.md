@@ -109,16 +109,16 @@ Fields in the report:
 ### Objective 2 — Coupling Analysis (DO-178C §6.3.1.b)
 
 **What it does:**
-Maps all control coupling (call dependencies) and data coupling (shared global variables) between your code and each LRU (Line Replaceable Unit) in the avionics system. Assigns a risk level (low / medium / high) per LRU.
+Maps all control coupling (call dependencies) and data coupling (shared global variables) between your code and each LRU (Line Replaceable Unit) in the avionics system. Assigns a risk level (low / medium / high) per LRU. An LRU is analysed only when you give the engine a specification document for it.
 
 **How to run (CLI):**
 ```bash
-# Basic — uses LRU names from config.yaml only
+# Without LRU documents: no LRU is analysed, so the per-LRU section of the report is empty
 python main.py analyze /path/to/cpp_code
 ```
 
 ```bash
-# With LRU specification documents (recommended — better coverage)
+# With LRU specification documents (needed for per-LRU coupling)
 python main.py analyze /path/to/cpp_code \
   --lru-docs /path/to/lru_specifications/
 ```
@@ -126,7 +126,7 @@ python main.py analyze /path/to/cpp_code \
 **What to provide:**
 - `lru_docs/` — folder containing LRU PDF or DOCX specification documents
   - Naming: `ADS.pdf`, `FCS.docx`, `FMS.pdf`, etc. (file name = LRU name)
-  - If omitted, analysis uses LRU names from `config.yaml` only
+  - If omitted, no LRU is analysed. The report has no per-LRU entries
 
 **Output:** `output/coupling_analysis.docx`
 
@@ -137,16 +137,7 @@ Fields in the report:
 
 No numeric coupling score is produced. The matched code comes from semantic search when it is available, and from keyword matching otherwise (`--no-semantic-search`).
 
-**Adding LRU names without documents:**
-Edit `config.yaml`:
-```yaml
-lru_names:
-  - ADS
-  - FCS
-  - FMS
-  - FADEC
-  - YOUR_LRU_NAME
-```
+**`lru_names` in `config.yaml`:** the engine currently does not read this key. LRUs come only from the files in `--lru-docs`, so listing a name there does not add an LRU to the analysis. The key is kept for a later release.
 
 ---
 
@@ -158,7 +149,7 @@ Finds code with no call path from the entry points, and classifies each finding 
 | Category | Disposition | Meaning |
 |----------|------------|---------|
 | `dead_code` | Remove | No call path from any entry point |
-| `deactivated_code` | Justify as Deactivated | Excluded from the build (`#if 0`, or only built under an `#if` guard), or test-support code |
+| `deactivated_code` | Justify as Deactivated | Excluded from the build (`#if 0`, or only built under an `#if`/`#ifdef` guard), only reachable from such guarded code, or test-support code |
 | `unused_export` | Investigate | Referenced only by name outside the call graph (function pointer, table, macro), a virtual that is never dispatched or sits in a class that is never instantiated, an `extern "C"` function, an operator, or a callback-like name |
 | `dead_fragment` | Fix Fragment | Statements after an unconditional `return`, `throw`, `break`, `continue` or `goto`, or the body of `if (0)` |
 | `unused_variable` | Remove (local) / Investigate (parameter) | A local variable never used after its declaration, or a parameter never used in the body |
@@ -192,11 +183,15 @@ entry_point_patterns:
   - '*Task'
 ```
 
-Constructors and destructors of instantiated classes are implicit entry points. The report lists the entry points it used.
+Constructors and destructors of instantiated classes are implicit entry points, and so are the functions called from file-scope initialisers (`static Foo g = make();`), which run before `main`. The report lists the entry points it used.
+
+The report warns when an `entry_point_patterns` entry matches no function, and when a pattern matches more than 50 % of all functions (then almost nothing can be dead, and the pattern is probably too broad).
+
+Calls are resolved by the receiver's type. Chained calls (`Mgr::instance().compute()`) and global-scope calls (`::f()`) are resolved too. When the receiver's type is unknown, the call becomes a conservative `unresolved` edge to every function of that name, so a possible caller is never missed. These calls are listed under `unresolved_calls` in the JSON.
 
 **Output:** `output/dead_code_report.docx` (`.md` with `--output-format markdown`) and `output/dead_code_findings.json` (the same findings, machine-readable).
 
-The report has warnings, summary tables by category and confidence, a findings table (ID, file, symbol, lines, type, reason, confidence, status) and a detail block per finding:
+The report has warnings, summary tables by category and confidence, a findings table (ID, file, symbol, lines, type, reason, confidence, status; the table also shows each finding's category and disposition) and a detail block per finding:
 - **ID**: `DC-<kind>-<8 hex>`. The kind is `FUNC` (free function), `METH` (method), `CFG` (excluded by the build configuration), `FRAG` (dead fragment) or `VAR` (variable or parameter). The 8 hex digits are the first 8 digits of a SHA-1 of the file name, symbol, kind and detail. The symbol is the function's signature key (for a fragment or variable, its enclosing function). The detail is the fragment's text or the variable's name. Line numbers are not hashed, so an ID survives edits above it. Renaming the function, renaming the file or changing a fragment's text gives a new ID. Moving a file to another directory keeps it, because only the file name is hashed.
 - **File, lines, function/symbol, category, disposition**
 - **Confidence** and **Reason**, for example `no call path from entry points [main()]`
@@ -219,7 +214,7 @@ findings:
 
 - Each entry needs `status` and `justification`. An entry without them is ignored, with a warning.
 - An ID that matches no finding gives a `stale disposition` warning. The ID changes when the function or file is renamed, so update the file.
-- `status` is free text. Any value other than `open` with a justification marks the finding as reviewed. The report shows the status and justification. The SQA checklist accepts an unreachable virtual override when its finding is reviewed (VA-03), and DC-03 counts only open high-confidence dead-code findings.
+- `status` must be one of `open`, `confirmed_dead`, `false_positive` or `deactivated`; other values are not accepted. Any value other than `open`, with a justification, marks the finding as reviewed. The report shows the status and justification. The SQA checklist accepts an unreachable virtual override when its finding is reviewed (VA-03), and DC-03 counts only open high-confidence dead-code findings.
 - A disposition records the review. It does not change the category or the disposition.
 
 ---
@@ -420,7 +415,7 @@ SpeedSensor        (not found)        -            -            -
 
 `SpeedSensor` has no class in the fixture, so it shows `(not found)`. Sensor classes that match no template are listed on a separate line.
 
-**Sample checks (`sensor-check`).** Replays recorded samples through the template's rules. The CSV needs the header `sensor,timestamp_ms,value`, and the sensor names must match template names. Each sample shows the value the checks accept (`accepted`) and its flags.
+**Sample checks (`sensor-check`).** Replays recorded samples through the template's rules. The CSV needs the header `sensor,timestamp_ms,value`, and the sensor names must match template names. Each sample shows the value the checks accept (`accepted`) and its flags. The CSV must be UTF-8 (a BOM, as Excel writes it, is accepted); another encoding gives an error that names the file.
 
 ```text
 sensor,timestamp_ms,value
@@ -561,11 +556,13 @@ Fill in the paths, choose the output format and DAL level, then press **Run Anal
 - **Standards profile file** and **Sensor templates file** are optional. An empty field uses the value from `config.yaml` (`standards_file`, `sensor_templates_file`). A path that does not exist blocks **Run Analysis** with a message.
 - **Use semantic search** is on by default and needs sentence-transformers. When it is off, coupling uses keyword matching, and the progress log says so.
 - **Output format** defaults to Markdown. DOCX is the other choice.
-- **Preview Standards** needs a standards file. It shows the structured standards profile extracted from that file, and **Back** returns to the Config screen.
+- **Preview Standards** uses only the file typed in the **Standards profile file** field. It does not fall back to `standards_file` in `config.yaml`, and it asks for a file when the field is empty. It shows the structured standards profile extracted from that file, and **Back** returns to the Config screen.
 
 **Screen 2 — Analysis Progress**
 
 Progress rows for Parsing, Virtual, Dead code, Standards, Coupling and Sensors, plus a live log showing what the engine is doing. The Sensors row reads "skipped" when no sensor templates are configured. Automatically advances to Results when complete. A failed run prints the error in red in the log; **Esc** returns to the Config screen once the run has finished.
+
+While the TUI runs, log messages are written to `tui.log` in the configured `cache_dir` instead of the terminal, so they do not draw over the screen. If that file cannot be created the TUI says so and discards the log output. The terminal log returns when the TUI exits.
 
 **Screen 3 — Results Browser**
 
@@ -753,7 +750,7 @@ ollama serve
 ollama pull llama3.1:8b   # or your preferred model
 ```
 
-Set `ollama_url` and `ollama_model` in `config.yaml` to match your server and model, and set `ollama_enabled: true`. The chat uses the model only when `ollama_enabled` is true and the server answers. It checks the server when the chat opens and again before each answer. `ask` follows the same rule.
+Set `ollama_url` and `ollama_model` in `config.yaml` to match your server and model, and set `ollama_enabled: true`. The chat uses the model only when `ollama_enabled` is true and the server answers. The chat checks the server once, when it opens, and keeps that result until the chat is closed: start Ollama before opening the chat, or close and reopen the chat after starting it. `ask` follows the same rule and checks the server each time it runs.
 
 **How an answer is built:**
 - **Facts** (structural questions): the virtual functions a class implements or overrides, what a method reads, writes and calls and what is affected if it changes, the checks applied to a sensor, and a class's inheritance. These are the same facts that `ask` and `effect` print.
@@ -944,7 +941,7 @@ entry_point_patterns:          # interrupt handlers and RTOS tasks, matched by n
   - 'ISR_*'
   - '*Task'
 
-# LRU names for coupling analysis (match your LRU spec filenames)
+# LRU names (currently unused: per-LRU coupling comes from the documents given with --lru-docs)
 lru_names:
   - ADS
   - FCS
@@ -973,6 +970,8 @@ ollama_url: http://localhost:11434
 ```
 
 Relative paths in `standards_file`, `sensor_templates_file` and `dead_code_dispositions` are resolved against the directory of the config file. `entry_point_patterns` and the sensor template fields are described in Objective 3 and R3.
+
+Config values are type-checked. A list field (`entry_points`, `entry_point_patterns`, `lru_names`) may be written as a single string; it is used as a one-item list and a warning is logged. A value of the wrong type, or a `config.yaml` that is not valid YAML, stops the run with an error that names the field or the file instead of a traceback.
 
 ---
 

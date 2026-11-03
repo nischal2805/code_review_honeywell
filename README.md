@@ -174,7 +174,7 @@ entry_point_patterns:     # interrupt handlers and RTOS tasks, matched by name
   - 'ISR_*'
   - '*Task'
 
-# LRU names for coupling analysis
+# LRU names (currently unused: per-LRU coupling comes from the documents given with --lru-docs)
 lru_names:
   - ADS
   - FCS

@@ -152,6 +152,19 @@ def test_csv_missing_column_in_header(tmp_path):
         load_samples_csv(_csv(tmp_path, 'sensor,value\nTemperatureSensor,25\n'))
 
 
+def test_csv_with_a_utf8_bom_is_read(tmp_path):         # Excel's "CSV UTF-8" starts with a BOM
+    path = tmp_path / 'excel.csv'
+    path.write_bytes(b'\xef\xbb\xbfsensor,timestamp_ms,value\nTemperatureSensor,0,25.0\n')
+    assert load_samples_csv(path) == {'TemperatureSensor': [(0.0, 25.0)]}
+
+
+def test_csv_that_is_not_utf8_is_a_value_error_naming_the_file(tmp_path):
+    path = tmp_path / 'latin.csv'
+    path.write_bytes('sensor,timestamp_ms,value\nTemp\xe9,0,25.0\n'.encode('latin-1'))
+    with pytest.raises(ValueError, match=r'latin\.csv: .*UTF-8'):
+        load_samples_csv(path)
+
+
 # ── Inline samples ──────────────────────────────────────────────────────────
 
 def test_parse_inline_samples():
