@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,8 @@ class SensorTemplate:
 def _num(sensor: str, label: str, value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"Sensor '{sensor}': {label} must be a number, got {value!r}")
+    if not math.isfinite(value):   # NaN would pass every comparison below and silently disable the check
+        raise ValueError(f"Sensor '{sensor}': {label} must be a finite number, got {value!r}")
     return float(value)
 
 
@@ -131,4 +134,10 @@ def load_sensor_templates(path: str | Path) -> List[SensorTemplate]:
         raws.append(data['sensor'])
     if not raws:
         raise ValueError(f"{path}: no sensors defined (expected 'sensors:' list or 'sensor:' mapping)")
-    return [_build(raw, defaults) for raw in raws]
+    templates = [_build(raw, defaults) for raw in raws]
+    seen = set()
+    for tpl in templates:
+        if tpl.name in seen:
+            raise ValueError(f"{path}: duplicate sensor name {tpl.name!r}")
+        seen.add(tpl.name)
+    return templates

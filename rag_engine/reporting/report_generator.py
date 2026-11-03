@@ -8,6 +8,7 @@ from rag_engine.document_processor.template_engine import render
 from rag_engine.features.function_effect import FunctionEffect
 from rag_engine.features.dead_code_detector import DeadCodeReport
 from rag_engine.features.standards_validator import ComplianceReport
+from rag_engine.features.sensor_analysis import SensorAnalysisResult
 from rag_engine.features.virtual_analysis import VirtualAnalysisResult
 from rag_engine.reporting.output_formatter import markdown_to_docx, write_text_file
 
@@ -94,6 +95,17 @@ class ReportGenerator:
             'llm_narrative': llm_narrative,
         })
         return self._save('standards_report', md, format)
+
+    def generate_sensor_analysis(self, result: SensorAnalysisResult, format: _FORMAT = 'docx',
+                                  llm_narrative: Optional[str] = None) -> str:
+        md = render('sensor_analysis.jinja2', {
+            'report_date': date.today().isoformat(),
+            'dal_level': self._cfg.dal_level,
+            'findings': result.findings,
+            'unmapped': result.unmapped_sensor_classes,
+            'llm_narrative': llm_narrative,
+        })
+        return self._save('sensor_analysis', md, format)
 
     def _save(self, name: str, md: str, format: _FORMAT) -> str:
         base = Path(self._cfg.output_dir)

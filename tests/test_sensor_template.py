@@ -144,3 +144,28 @@ def test_config_empty_sensor_templates_file_stays_empty(tmp_path):
     cfg_path = tmp_path / 'config.yaml'
     cfg_path.write_text("sensor_templates_file: ''\n", encoding='utf-8')
     assert load_config(str(cfg_path)).sensor_templates_file == ''
+
+
+@pytest.mark.parametrize('text, field', [
+    ('sensors:\n  - {name: A, valid_range: {min: .nan, max: 5}}\n', 'valid_range.min'),
+    ('sensors:\n  - {name: A, valid_range: {min: 0, max: .inf}}\n', 'valid_range.max'),
+    ('sensors:\n  - {name: A, valid_range: {min: -.inf, max: 5}}\n', 'valid_range.min'),
+    ('sensors:\n  - {name: A, stale: {threshold_ms: .nan}}\n', 'stale.threshold_ms'),
+    ('sensors:\n  - {name: A, debounce: {threshold: .inf}}\n', 'debounce.threshold'),
+    ('sensors:\n  - {name: A, sampling_interval_ms: .nan}\n', 'sampling_interval_ms'),
+    ('defaults: {stale: {threshold_ms: .inf}}\nsensors:\n  - {name: A}\n', 'stale.threshold_ms'),
+])
+def test_non_finite_numbers_are_rejected_naming_sensor_and_field(tmp_path, text, field):
+    with pytest.raises(ValueError) as exc:
+        _load(tmp_path, text)
+    assert "'A'" in str(exc.value) and field in str(exc.value) and 'finite' in str(exc.value)
+
+
+def test_duplicate_sensor_names_are_rejected(tmp_path):
+    with pytest.raises(ValueError, match="duplicate.*'TemperatureSensor'"):
+        _load(tmp_path, 'sensors:\n  - {name: TemperatureSensor}\n  - {name: B}\n  - {name: TemperatureSensor}\n')
+
+
+def test_duplicate_between_list_and_single_forms_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="duplicate.*'A'"):
+        _load(tmp_path, 'sensors:\n  - {name: A}\nsensor: {name: A}\n')
