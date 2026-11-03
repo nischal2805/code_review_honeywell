@@ -1,15 +1,17 @@
 from __future__ import annotations
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
 from rag_engine.config import Config
 from rag_engine.document_processor.template_engine import render
-from rag_engine.features.coupling_analysis import CouplingAnalysisResult
 from rag_engine.features.dead_code_detector import DeadCodeReport
 from rag_engine.features.standards_validator import ComplianceReport
 from rag_engine.features.virtual_analysis import VirtualAnalysisResult
 from rag_engine.reporting.output_formatter import markdown_to_docx, write_text_file
+
+if TYPE_CHECKING:   # annotation only; importing it would load the embedding models
+    from rag_engine.features.coupling_analysis import CouplingAnalysisResult
 
 _FORMAT = Literal['markdown', 'docx']
 
@@ -40,6 +42,9 @@ class ReportGenerator:
             'summary': result.summary,
             'base_virtual_count': result.base_virtual_count,
             'current_virtual_count': result.current_virtual_count,
+            'inventory': result.inventory,
+            'hierarchy_trees': result.hierarchy_trees,
+            'entry_points': result.entry_points,
             'llm_narrative': llm_narrative,
         })
         return self._save('virtual_analysis', md, format)

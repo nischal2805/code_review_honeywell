@@ -120,6 +120,7 @@ class MethodDecl:
     is_override: bool
     is_final: bool
     has_body: bool        # defined inline inside the class body
+    parameters: List[Parameter] = field(default_factory=list)   # as declared, with default values
 
 
 @dataclass
@@ -142,6 +143,16 @@ class ParseResult:
     includes: List[str]
     raw_source: bytes
     class_defs: List[ClassDef] = field(default_factory=list)
+
+
+@dataclass
+class CallSite:
+    caller: str                 # sig_key of the calling function
+    target: str                 # sig_key of the statically resolved callee; may be a declaration-only method
+    file_path: str
+    line: int                   # absolute 1-based line in file_path, 0 if unknown
+    call_type: str              # 'direct' | 'virtual' | 'callback' | 'constructor' | 'unresolved'
+    receiver: Optional[str] = None   # e.g. "sensor" for sensor.read(), "s" for s->process()
 
 
 @dataclass

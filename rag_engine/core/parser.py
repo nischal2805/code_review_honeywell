@@ -388,6 +388,7 @@ class CodeParser:
             is_override=is_override,
             is_final=is_final,
             has_body=member.type == 'function_definition',
+            parameters=parameters,
         )
 
     def _field_defs(self, member: Node, source: bytes) -> List[FieldDef]:

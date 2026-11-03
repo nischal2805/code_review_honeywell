@@ -62,7 +62,8 @@ def analyze(
     lru_doc_texts = DocReader().read_lru_documents(lru_docs) if lru_docs else {}
 
     def run_virtual():
-        return VirtualAnalyzer(base_results, current_results).analyze()
+        return VirtualAnalyzer(base_results, current_results, graph_builder=gb,
+                               entry_points=cfg.entry_points).analyze()
 
     def run_coupling():
         return CouplingAnalyzer(current_results, gb, search, lru_doc_texts).analyze()

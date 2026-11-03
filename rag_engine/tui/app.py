@@ -398,7 +398,8 @@ class AnalysisScreen(Screen):
 
             # Virtual
             self._log("[bold]Running virtual analysis...[/bold]")
-            virtual = VirtualAnalyzer(base, current).analyze()
+            virtual = VirtualAnalyzer(base, current, graph_builder=gb,
+                                      entry_points=cfg.entry_points).analyze()
             self._advance("pb-virtual", 100)
             s = virtual.summary
             self._log(f"  Added [red]{s['added']}[/red]  Modified [yellow]{s['modified']}[/yellow]  "

@@ -9,7 +9,7 @@ from rag_engine.models import ParseResult
 
 # Bump whenever the pickled ParseResult/FunctionDef shape changes: it is part of the stored
 # hash, so entries written by an older shape miss instead of loading without new attributes.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 class AnalysisCache:
