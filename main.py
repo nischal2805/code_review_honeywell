@@ -34,7 +34,10 @@ def _fail(message: str) -> typer.Exit:
 
 
 def _load(config: str, templates: Optional[str] = None) -> Config:
-    cfg = load_config(config)
+    try:
+        cfg = load_config(config)
+    except ValueError as exc:
+        raise _fail(f"Error: {exc}")
     if templates:
         if not Path(templates).expanduser().exists():
             raise _fail(f"Sensor templates file not found: {templates}")
@@ -209,7 +212,10 @@ def ask(
 @app.command()
 def validate_config(config: str = typer.Option('config.yaml')) -> None:
     """Validate configuration file."""
-    cfg = load_config(config)
+    try:
+        cfg = load_config(config)
+    except ValueError as exc:
+        raise _fail(f"Error: {exc}")
     typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
 
 if __name__ == '__main__':

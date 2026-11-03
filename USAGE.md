@@ -185,13 +185,13 @@ entry_point_patterns:
 
 Constructors and destructors of instantiated classes are implicit entry points, and so are the functions called from file-scope initialisers (`static Foo g = make();`), which run before `main`. The report lists the entry points it used.
 
-The report warns when an `entry_point_patterns` entry matches no function, and when a pattern matches more than 50 % of all functions (then almost nothing can be dead, and the pattern is probably too broad).
+The report warns with `entry_point_pattern '<pattern>' matches nothing` when one of your `entry_point_patterns` matches no function (the built-in defaults are not checked), and with `entry_point_patterns match N of M functions — check the configuration` when the patterns together match more than half of all functions (then almost nothing can be dead).
 
-Calls are resolved by the receiver's type. Chained calls (`Mgr::instance().compute()`) and global-scope calls (`::f()`) are resolved too. When the receiver's type is unknown, the call becomes a conservative `unresolved` edge to every function of that name, so a possible caller is never missed. These calls are listed under `unresolved_calls` in the JSON.
+Calls are resolved by the receiver's type, and global-scope calls (`::f()`) too. A chained call such as `Mgr::instance().compute()` has no plain receiver, so `compute` becomes a conservative `unresolved` edge to every function of that name, as does any call whose receiver type is unknown. A possible caller is never missed this way. These calls are listed under `unresolved_calls` in the JSON.
 
 **Output:** `output/dead_code_report.docx` (`.md` with `--output-format markdown`) and `output/dead_code_findings.json` (the same findings, machine-readable).
 
-The report has warnings, summary tables by category and confidence, a findings table (ID, file, symbol, lines, type, reason, confidence, status; the table also shows each finding's category and disposition) and a detail block per finding:
+The report has warnings, summary tables by category and confidence, a findings table (ID, file, symbol, lines, category, disposition, reason, confidence, status) and a detail block per finding:
 - **ID**: `DC-<kind>-<8 hex>`. The kind is `FUNC` (free function), `METH` (method), `CFG` (excluded by the build configuration), `FRAG` (dead fragment) or `VAR` (variable or parameter). The 8 hex digits are the first 8 digits of a SHA-1 of the file name, symbol, kind and detail. The symbol is the function's signature key (for a fragment or variable, its enclosing function). The detail is the fragment's text or the variable's name. Line numbers are not hashed, so an ID survives edits above it. Renaming the function, renaming the file or changing a fragment's text gives a new ID. Moving a file to another directory keeps it, because only the file name is hashed.
 - **File, lines, function/symbol, category, disposition**
 - **Confidence** and **Reason**, for example `no call path from entry points [main()]`
@@ -214,7 +214,7 @@ findings:
 
 - Each entry needs `status` and `justification`. An entry without them is ignored, with a warning.
 - An ID that matches no finding gives a `stale disposition` warning. The ID changes when the function or file is renamed, so update the file.
-- `status` must be one of `open`, `confirmed_dead`, `false_positive` or `deactivated`; other values are not accepted. Any value other than `open`, with a justification, marks the finding as reviewed. The report shows the status and justification. The SQA checklist accepts an unreachable virtual override when its finding is reviewed (VA-03), and DC-03 counts only open high-confidence dead-code findings.
+- `status` must be one of `open`, `confirmed_dead`, `false_positive` or `deactivated`; other values are ignored with a warning. Any value other than `open`, with a justification, marks the finding as reviewed. The report shows the status and justification. The SQA checklist accepts an unreachable virtual override when its finding is reviewed (VA-03), and DC-03 counts only open high-confidence dead-code findings.
 - A disposition records the review. It does not change the category or the disposition.
 
 ---
@@ -658,12 +658,12 @@ With `ollama_enabled: true` (the shipped `config.yaml`), the reports also get an
 Rows from `dead_code_report.md` (its findings table; four of fourteen rows):
 
 ```text
-| ID | File | Function/Symbol | Lines | Type | Reason | Confidence | Status |
-|----|------|-----------------|-------|------|--------|------------|--------|
-| DC-METH-CE163B0F | altitude_sensor.h | AltitudeSensor::read() | 8 | method | override in class never instantiated | medium | open |
-| DC-METH-80BD632A | display.cpp | Display::clear(int) | 7-9 | method | no call path from entry points [TIMER0_IRQHandler(), main()] | high | open |
-| DC-CFG-6F03AB16 | main.cpp | disabledFeature() | 49-51 | function | excluded from the build by `#if 0` | high | open |
-| DC-FRAG-67F264C3 | main.cpp | computeChecksum(int) / x = 0; | 30 | fragment | statements after unconditional `return` can never execute | high | open |
+| ID | File | Function/Symbol | Lines | Category | Disposition | Reason | Confidence | Status |
+|----|------|-----------------|-------|----------|-------------|--------|------------|--------|
+| DC-METH-CE163B0F | altitude_sensor.h | AltitudeSensor::read() | 8 | unused_export | Investigate | override in class never instantiated | medium | open |
+| DC-METH-80BD632A | display.cpp | Display::clear(int) | 7-9 | dead_code | Remove | no call path from entry points [TIMER0_IRQHandler(), main()] | high | open |
+| DC-CFG-6F03AB16 | main.cpp | disabledFeature() | 49-51 | deactivated_code | Justify as Deactivated | excluded from the build by `#if 0` | high | open |
+| DC-FRAG-67F264C3 | main.cpp | computeChecksum(int) / x = 0; | 30 | dead_fragment | Fix Fragment | statements after unconditional `return` can never execute | high | open |
 ```
 
 One item from `dead_code_findings.json`:
@@ -971,7 +971,7 @@ ollama_url: http://localhost:11434
 
 Relative paths in `standards_file`, `sensor_templates_file` and `dead_code_dispositions` are resolved against the directory of the config file. `entry_point_patterns` and the sensor template fields are described in Objective 3 and R3.
 
-Config values are type-checked. A list field (`entry_points`, `entry_point_patterns`, `lru_names`) may be written as a single string; it is used as a one-item list and a warning is logged. A value of the wrong type, or a `config.yaml` that is not valid YAML, stops the run with an error that names the field or the file instead of a traceback.
+Config values are type-checked. A list field (`entry_points`, `entry_point_patterns`, `lru_names`) may be written as a single string; it is used as a one-item list and a warning is logged. A value of the wrong type stops the run with an error that names the field. A `config.yaml` that is not valid YAML stops it with an error that names the file and line. Neither prints a traceback.
 
 ---
 

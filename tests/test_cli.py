@@ -180,3 +180,12 @@ def test_ask_adds_the_llm_explanation_when_ollama_is_reachable(cfg_file, monkeyp
 
 def test_validate_config_still_works(cfg_file):
     assert 'Config OK' in _invoke('validate-config', '--config', cfg_file).stdout
+
+
+def test_malformed_yaml_is_reported_as_an_error_not_a_traceback(tmp_path):
+    cfg = tmp_path / 'broken.yaml'
+    cfg.write_text('entry_points: [unclosed\n', encoding='utf-8')
+    result = _invoke('validate-config', '--config', cfg)
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)   # the _fail() exit, not an uncaught ValueError
+    assert 'Error:' in result.stderr and 'broken.yaml' in result.stderr
+    assert 'Traceback' not in result.output
