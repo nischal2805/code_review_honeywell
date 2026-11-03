@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
 from rag_engine.config import Config
 from rag_engine.document_processor.template_engine import render
+from rag_engine.features.function_effect import FunctionEffect
 from rag_engine.features.dead_code_detector import DeadCodeReport
 from rag_engine.features.standards_validator import ComplianceReport
 from rag_engine.features.virtual_analysis import VirtualAnalysisResult
@@ -58,6 +59,19 @@ class ReportGenerator:
             'llm_narrative': llm_narrative,
         })
         return self._save('coupling_analysis', md, format)
+
+    def generate_function_effect(self, effects: List[FunctionEffect], format: _FORMAT = 'docx',
+                                  query: Optional[str] = None) -> str:
+        """*query* names the report when *effects* is empty; otherwise the first function's short name does."""
+        short = query or (effects[0].function.split('(')[0].rsplit('::', 1)[-1] if effects else 'unknown')
+        md = render('function_effect.jinja2', {
+            'report_date': date.today().isoformat(),
+            'dal_level': self._cfg.dal_level,
+            'query': short,
+            'effects': effects,
+        })
+        safe = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in short)
+        return self._save(f"function_effect_{safe}", md, format)
 
     def generate_dead_code(self, result: DeadCodeReport, format: _FORMAT = 'docx',
                             llm_narrative: Optional[str] = None) -> str:

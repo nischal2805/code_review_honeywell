@@ -1,0 +1,39 @@
+# Function Effect and Coupling Analysis — {{ query }}
+Generated: {{ report_date }}
+DAL Level: {{ dal_level }}
+
+{% for e in effects %}
+## {{ e.function }}
+- File: {{ e.file_path }}:{{ e.start_line }}-{{ e.end_line }}
+- Returns: {{ e.return_type or 'unknown' }}
+- Parameters: {% for p in e.parameters %}{{ p.type_ }} {{ p.name }}{{ ', ' if not loop.last }}{% else %}none{% endfor %}
+
+- What it does: {{ e.description }}
+- Reads: {% for v in e.reads %}{{ v.name }} ({{ 'member of ' ~ v.owner if v.kind == 'member' and v.owner else v.kind }}{{ ', ' ~ v.type_ if v.type_ }}){{ ', ' if not loop.last }}{% else %}none{% endfor %}
+
+- Writes: {% for v in e.writes %}{{ v.name }} ({{ 'member of ' ~ v.owner if v.kind == 'member' and v.owner else v.kind }}{{ ', ' ~ v.type_ if v.type_ }}){{ ', ' if not loop.last }}{% else %}none{% endfor %}
+
+- Calls:
+{% for c in e.calls %}
+  - {{ c.callee }}{{ ' via ' ~ c.receiver if c.receiver }} ({{ 'line %d, ' % c.line if c.line }}{{ c.call_type }})
+{% else %}
+  - none
+{% endfor %}
+- Called by: {{ e.callers | join(', ') or 'none' }}
+{% set indirect = e.transitive_callers | reject('in', e.callers) | list %}
+{% if indirect %}
+- Also called indirectly by: {{ indirect | join(', ') }}
+{% endif %}
+- Coupled components:
+{% for c in e.coupled_components %}
+  - {{ c.name }} ({{ c.coupling }}): {{ c.reason }}
+{% else %}
+  - none
+{% endfor %}
+- Data-coupled functions: {{ e.data_coupled_functions | join(', ') or 'none' }}
+- Affected if changed: {{ e.affected_components | join(', ') or 'none' }}
+
+{% else %}
+No function matches `{{ query }}`.
+
+{% endfor %}
