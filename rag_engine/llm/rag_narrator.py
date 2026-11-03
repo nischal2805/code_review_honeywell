@@ -1,10 +1,12 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 from loguru import logger
 
-from rag_engine.core.embeddings import SemanticSearch
 from rag_engine.llm.ollama_client import OllamaClient
 from rag_engine.models import FunctionDef
+
+if TYPE_CHECKING:   # annotation only; importing it would load the embedding models
+    from rag_engine.core.embeddings import SemanticSearch
 
 _SYS = (
     "You are a DO-178C certification engineer reviewing avionics software. "
@@ -13,6 +15,7 @@ _SYS = (
     "Reference specific functions, files, or line numbers from the context where relevant. "
     "Focus on certification risk, required actions, and DAL implications."
 )
+_RETRIEVAL_SENTENCE = "You have access to retrieved code context from a semantic search index. "
 
 
 def _format_functions(functions: List[FunctionDef], max_funcs: int = 8) -> str:
@@ -37,39 +40,48 @@ def _format_functions(functions: List[FunctionDef], max_funcs: int = 8) -> str:
 
 
 class RAGNarrativeGenerator:
-    def __init__(self, llm: OllamaClient, search: SemanticSearch) -> None:
+    """Prompts the local LLM with retrieved code (when a semantic index exists) and deterministic facts."""
+
+    def __init__(self, llm: OllamaClient, search: Optional[SemanticSearch]) -> None:
         self._llm = llm
         self._search = search
 
+    def _system(self) -> str:
+        if self._search is not None:
+            return _SYS
+        return _SYS.replace(_RETRIEVAL_SENTENCE, "You are given deterministic static-analysis facts. ")
+
+    def _code_context(self, query: str, k: int, label: str = '') -> str:
+        """The retrieved-code prompt section; empty without a semantic index (the facts are then the only context)."""
+        if self._search is None:
+            return ''
+        related = self._search.find_related(query, k=k)
+        logger.debug(f"RAG retrieve: '{query}' → {len(related)} functions")
+        return (f"=== RETRIEVED CODE CONTEXT (FAISS semantic search{label}) ===\n"
+                f"{_format_functions(related)}\n\n")
+
     def generate(self, retrieval_query: str, analysis_summary: str,
                  k: int = 8, max_tokens: int = 400) -> Optional[str]:
-        related = self._search.find_related(retrieval_query, k=k)
-        context = _format_functions(related)
         prompt = (
-            f"{_SYS}\n\n"
-            f"=== RETRIEVED CODE CONTEXT (FAISS semantic search, query: '{retrieval_query}') ===\n"
-            f"{context}\n\n"
+            f"{self._system()}\n\n"
+            f"{self._code_context(retrieval_query, k, f', query: {retrieval_query!r}')}"
             f"=== ANALYSIS RESULTS ===\n"
             f"{analysis_summary}\n\n"
             f"Provide your DO-178C certification assessment:"
         )
-        logger.debug(f"RAG retrieve: '{retrieval_query}' → {len(related)} functions")
         result = self._llm.generate(prompt, max_tokens=max_tokens)
         return result if result else None
 
     def answer_question(self, question: str, analysis_context: str,
                         k: int = 8, max_tokens: int = 500) -> Optional[str]:
-        related = self._search.find_related(question, k=k)
-        context = _format_functions(related)
+        indexed = self._search is not None
         prompt = (
-            f"{_SYS}\n\n"
-            f"=== RETRIEVED CODE CONTEXT (FAISS semantic search) ===\n"
-            f"{context}\n\n"
-            f"=== ANALYSIS SUMMARY ===\n"
+            f"{self._system()}\n\n"
+            f"{self._code_context(question, k)}"
+            f"=== {'ANALYSIS SUMMARY' if indexed else 'STATIC-ANALYSIS FACTS'} ===\n"
             f"{analysis_context}\n\n"
             f"=== USER QUESTION ===\n"
             f"{question}\n\n"
-            f"Answer based on the retrieved code and analysis results:"
+            f"Answer based on the {'retrieved code and analysis results' if indexed else 'static-analysis facts'}:"
         )
-        logger.debug(f"RAG chat: '{question}' → {len(related)} functions retrieved")
         return self._llm.generate(prompt, max_tokens=max_tokens)

@@ -3,12 +3,12 @@ from pathlib import Path
 from typing import List
 from loguru import logger
 
-from rag_engine.core.embeddings import SemanticSearch
 from rag_engine.models import FunctionDef
 
 
 class IndexManager:
     def __init__(self, index_dir: str, model_name: str = 'all-MiniLM-L6-v2') -> None:
+        from rag_engine.core.embeddings import SemanticSearch   # heavy: loads the embedding model libraries
         self._dir = Path(index_dir)
         self._search = SemanticSearch(model_name=model_name)
         self._loaded = False

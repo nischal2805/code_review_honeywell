@@ -205,3 +205,22 @@ class VirtualAnalyzer:
                 return m.group(1)
             i -= 1
         return None
+
+
+def format_virtual_function(info: VirtualFunctionInfo) -> str:
+    """The R1 text block: Virtual Function / Overridden by / Inheritance / Usage."""
+    def where(site: CallSite) -> str:
+        return f"{site.caller} ({site.file_path}{':%d' % site.line if site.line else ''})"
+
+    kind = 'pure virtual' if info.is_pure else 'implemented' if info.has_definition else 'declaration only'
+    overrides = ', '.join(f"{o.function}{'' if o.reachable else ' [not reachable]'}"
+                          for o in info.overridden_by) or 'none'
+    usage = 'Called from ' + '; '.join(where(s) for s in info.call_sites) if info.call_sites else 'no call sites found'
+    return '\n'.join([
+        f"Virtual Function: {info.function}",
+        f"  Declared in:   {info.file_path}:{info.line_number} ({kind})",
+        f"  Overridden by: {overrides}",
+        "  Inheritance:",
+        *('    ' + line for line in info.inheritance_tree.splitlines()),
+        f"  Usage:         {usage}",
+    ])

@@ -421,7 +421,7 @@ def test_report_with_no_findings(tmp_path):
 # ── SQA checklist ──────────────────────────────────────────────────────────────
 
 def _checklist(tmp_path, dead):
-    virtual = SimpleNamespace(changes=[], summary={})
+    virtual = SimpleNamespace(changes=[], summary={}, inventory=[])
     standards = SimpleNamespace(violations_by_severity={}, compliance_score=100.0)
     cl = ChecklistFiller(Config(output_dir=str(tmp_path))).fill_sqa_checklist(virtual, dead, standards)
     return {i.item_id: i for i in cl.items}

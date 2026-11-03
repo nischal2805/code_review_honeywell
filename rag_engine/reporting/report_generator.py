@@ -27,14 +27,18 @@ class ReportGenerator:
     def generate_all(self, virtual: VirtualAnalysisResult, coupling: CouplingAnalysisResult,
                      dead: DeadCodeReport, standards: ComplianceReport,
                      format: _FORMAT = 'docx',
-                     llm_narratives: Optional[Dict[str, str]] = None) -> List[str]:
+                     llm_narratives: Optional[Dict[str, str]] = None,
+                     sensors: Optional[SensorAnalysisResult] = None) -> List[str]:
         n = llm_narratives or {}
-        return [
+        paths = [
             self.generate_virtual_analysis(virtual, format, n.get('virtual')),
             self.generate_coupling_analysis(coupling, format, n.get('coupling')),
             self.generate_dead_code(dead, format, n.get('dead_code')),
             self.generate_standards(standards, format, n.get('standards')),
         ]
+        if sensors is not None:
+            paths.append(self.generate_sensor_analysis(sensors, format, n.get('sensors')))
+        return paths
 
     def generate_virtual_analysis(self, result: VirtualAnalysisResult, format: _FORMAT = 'docx',
                                    llm_narrative: Optional[str] = None) -> str:

@@ -284,6 +284,20 @@ python main.py analyze CODEBASE [OPTIONS]
 | `--lru-docs PATH` | No | — | Directory with LRU PDF/DOCX specs |
 | `--config PATH` | No | `config.yaml` | Config file path |
 | `--output-format` | No | `docx` | `docx` or `markdown` |
+| `--sensor-templates PATH` | No | `sensor_templates_file` | Sensor template YAML; enables the sensor report |
+| `--no-semantic-search` | No | off | Skip the embedding model (coupling uses keyword matching) |
+
+Query commands (no reports except `effect`; no embedding model needed):
+
+```bash
+python main.py virtuals CODEBASE                      # virtual functions, overrides, callers, class trees
+python main.py effect CODEBASE updateTemperature      # what a method reads/writes/calls and what it affects
+python main.py sensors CODEBASE --templates sensor_templates.yaml        # per-sensor stale/corrupt/debounce check table
+python main.py sensor-check samples.csv --templates sensor_templates.yaml  # replay sensor,timestamp_ms,value samples
+python main.py ask CODEBASE "What validation checks are applied to TemperatureSensor?" --sensor-templates sensor_templates.yaml
+```
+
+`ask` answers from the static analysis; when `ollama_enabled` is true and Ollama is reachable, the model only explains those facts.
 
 ```bash
 # Validate config without running analysis

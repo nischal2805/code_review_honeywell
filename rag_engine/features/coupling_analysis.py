@@ -1,12 +1,30 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from loguru import logger
 
-from rag_engine.core.embeddings import SemanticSearch
 from rag_engine.core.graph_builder import CallGraphBuilder
 from rag_engine.models import FunctionDef, LRUCoupling, ParseResult
+
+if TYPE_CHECKING:   # annotation only; importing it would load the embedding models
+    from rag_engine.core.embeddings import SemanticSearch
+
+_WORD = re.compile(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+')   # camelCase / snake_case / ACRONYM words
+# Plain English plus the verbs and nouns every C++ codebase is full of: matching on them couples an LRU to
+# every read() or update() in the code.
+_STOP_WORDS = {
+    'the', 'and', 'for', 'with', 'from', 'that', 'this', 'are', 'was', 'not', 'but', 'all', 'any', 'can',
+    'has', 'have', 'had', 'its', 'one', 'out', 'use', 'used', 'using', 'will', 'shall', 'should', 'must',
+    'may', 'each', 'every', 'when', 'then', 'than', 'also', 'into', 'over', 'such', 'only', 'which', 'their',
+    'there', 'these', 'those', 'where', 'while', 'other', 'between', 'via',
+    'get', 'set', 'read', 'write', 'update', 'init', 'initialize', 'process', 'check', 'handle', 'run',
+    'start', 'stop', 'value', 'values', 'data', 'new', 'make', 'create', 'compute', 'calculate', 'return',
+}
+
+
+def _words(text: str) -> Set[str]:
+    return {w.lower() for w in _WORD.findall(text) if len(w) >= 3 and w.lower() not in _STOP_WORDS}
 
 
 @dataclass
@@ -19,7 +37,7 @@ class CouplingAnalysisResult:
 
 class CouplingAnalyzer:
     def __init__(self, parse_results: Dict[str, ParseResult], graph_builder: CallGraphBuilder,
-                 search: SemanticSearch, lru_docs: Dict[str, str]) -> None:
+                 search: Optional[SemanticSearch], lru_docs: Dict[str, str]) -> None:
         self._results = parse_results
         self._graph = graph_builder
         self._search = search
@@ -39,7 +57,7 @@ class CouplingAnalyzer:
 
     def _analyze_lru(self, lru_name: str, doc_text: str,
                      control_map: Dict[str, List[str]], data_map: Dict[str, List[str]]) -> LRUCoupling:
-        related_fns = self._search.find_related(doc_text[:200], k=15)
+        related_fns = self._related_functions(doc_text)
         related_names = {fn.name for fn in related_fns}
         control_coupling = [
             f"{fn.name} ({fn.file_path}:{fn.line_number})"
@@ -57,6 +75,19 @@ class CouplingAnalyzer:
             risk = 'low'
         return LRUCoupling(lru_name=lru_name, control_coupling=control_coupling,
                            data_coupling=data_coupling, risk_level=risk)  # type: ignore[arg-type]
+
+    def _related_functions(self, doc_text: str, k: int = 15) -> List[FunctionDef]:
+        if self._search is not None:
+            return self._search.find_related(doc_text[:200], k=k)
+        # shortcut: keyword overlap with function names and docstrings, no stemming or synonyms;
+        # use the semantic search for better recall.
+        doc_words = _words(doc_text)
+        scored = []
+        for fn in self._all_functions:
+            score = len((_words(fn.name) | _words(fn.docstring or '')) & doc_words)   # distinct document terms hit
+            if score:
+                scored.append((-score, fn.sig_key, fn))
+        return [fn for _, _, fn in sorted(scored, key=lambda s: s[:2])[:k]]
 
     def _build_data_map(self, global_vars: List[str]) -> Dict[str, List[str]]:
         global_set = set(global_vars)
