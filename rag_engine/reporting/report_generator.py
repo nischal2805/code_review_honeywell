@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import date
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
@@ -81,8 +82,20 @@ class ReportGenerator:
             'dal_level': self._cfg.dal_level,
             'items': result.items,
             'coverage_impact': result.structural_coverage_impact,
+            'warnings': result.warnings,
+            'entry_points': result.entry_points_used,
+            'total_functions': result.total_functions,
+            'unresolved_calls': result.unresolved_calls,
+            'counts_by_category': result.counts_by_category,
+            'counts_by_confidence': {c: sum(1 for i in result.items if i.confidence == c)
+                                     for c in ('high', 'medium', 'low')},
             'llm_narrative': llm_narrative,
         })
+        findings = {'items': [vars(i) for i in result.items],   # vars(): the dataclass fields
+                    'warnings': result.warnings, 'entry_points': result.entry_points_used,
+                    'unresolved_calls': result.unresolved_calls}
+        (Path(self._cfg.output_dir) / 'dead_code_findings.json').write_text(
+            json.dumps(findings, indent=2), encoding='utf-8')
         return self._save('dead_code_report', md, format)
 
     def generate_standards(self, result: ComplianceReport, format: _FORMAT = 'docx',

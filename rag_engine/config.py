@@ -1,10 +1,14 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Literal
 import yaml
 
 from rag_engine.knowledge_base.standards_profile import extract_standards_profile_sections
+
+
+# fnmatch patterns on the short function name; interrupt handlers and RTOS tasks are never called from code.
+DEFAULT_ENTRY_POINT_PATTERNS = ['*_IRQHandler', '*_ISR', 'ISR_*', '*Task']
 
 
 @dataclass
@@ -18,6 +22,8 @@ class Config:
     ollama_enabled: bool = False
     max_workers: int = 4
     entry_points: List[str] = field(default_factory=lambda: ['main'])
+    entry_point_patterns: List[str] = field(default_factory=lambda: list(DEFAULT_ENTRY_POINT_PATTERNS))
+    dead_code_dispositions: str = ''
     cyclomatic_complexity_max: int = 10
     function_length_max: int = 50
     nesting_depth_max: int = 5
@@ -37,9 +43,11 @@ def load_config(path: str = 'config.yaml') -> Config:
         config_path = Path(path).expanduser().resolve()
         with config_path.open() as f:
             data = yaml.safe_load(f) or {}
-        valid = {k: v for k, v in data.items() if hasattr(Config, k) and k != 'standards_profile'}
+        # hasattr(Config, k) is False for default_factory fields, which silently dropped them
+        known = {f.name for f in fields(Config)}
+        valid = {k: v for k, v in data.items() if k in known and k != 'standards_profile'}
         cfg = Config(**valid)
-        for attr in ('standards_file', 'sensor_templates_file'):
+        for attr in ('standards_file', 'sensor_templates_file', 'dead_code_dispositions'):
             if getattr(cfg, attr):
                 file_path = Path(getattr(cfg, attr))
                 if not file_path.is_absolute():

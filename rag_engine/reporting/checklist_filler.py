@@ -48,6 +48,12 @@ class ChecklistFiller:
             'All dead code items have disposition (Remove/Justify)',
             'PASS' if all(i.do178c_disposition for i in dead.items) else 'OPEN',
             f"{len(dead.items)} items with disposition"))
+        open_dead = sum(1 for i in dead.items
+                        if i.category == 'dead_code' and i.confidence == 'high' and i.review_status == 'open')
+        cl.items.append(ChecklistItem('dead_code', 'DC-03',
+            'No open high-confidence dead code findings',
+            'PASS' if open_dead == 0 else 'OPEN',
+            f"{open_dead} open high-confidence dead code finding(s)"))
         critical = standards.violations_by_severity.get('CRITICAL', 0)
         cl.items.append(ChecklistItem('standards', 'STD-01',
             'Zero unresolved CRITICAL violations at release',

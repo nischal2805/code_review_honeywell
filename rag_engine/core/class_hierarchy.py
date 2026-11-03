@@ -58,6 +58,7 @@ class MethodInfo:
     is_pure: bool
     is_override: bool     # effective, as is_virtual
     has_body: bool        # defined inside the class body
+    is_static: bool = False
 
 
 def _match_key(info: MethodInfo) -> Optional[Tuple]:
@@ -137,7 +138,7 @@ class ClassHierarchy:
                     param_types=_param_types(decl.sig_key), parameters=list(decl.parameters),
                     file_path=cdef.file_path,
                     line_number=decl.line_number, is_virtual=decl.is_virtual, is_pure=decl.is_pure,
-                    is_override=decl.is_override, has_body=decl.has_body))
+                    is_override=decl.is_override, has_body=decl.has_body, is_static=decl.is_static))
         # Definitions the class body did not declare (member templates, parser misses).
         for result in parse_results.values():
             for fn in result.functions:
@@ -146,7 +147,8 @@ class ClassHierarchy:
                         sig_key=fn.sig_key, class_name=fn.class_name, short_name=fn.name.rsplit('::', 1)[-1],
                         param_types=list(fn.param_types), parameters=list(fn.parameters),
                         file_path=fn.file_path, line_number=fn.line_number,
-                        is_virtual=fn.is_virtual, is_pure=False, is_override=fn.is_override, has_body=True))
+                        is_virtual=fn.is_virtual, is_pure=False, is_override=fn.is_override, has_body=True,
+                        is_static=fn.is_static))
 
     def _add_method(self, info: MethodInfo) -> None:
         self.methods[info.sig_key] = info

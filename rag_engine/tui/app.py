@@ -399,7 +399,8 @@ class AnalysisScreen(Screen):
             # Virtual
             self._log("[bold]Running virtual analysis...[/bold]")
             virtual = VirtualAnalyzer(base, current, graph_builder=gb,
-                                      entry_points=cfg.entry_points).analyze()
+                                      entry_points=cfg.entry_points,
+                                      entry_point_patterns=cfg.entry_point_patterns).analyze()
             self._advance("pb-virtual", 100)
             s = virtual.summary
             self._log(f"  Added [red]{s['added']}[/red]  Modified [yellow]{s['modified']}[/yellow]  "
@@ -407,7 +408,8 @@ class AnalysisScreen(Screen):
 
             # Dead code
             self._log("[bold]Running dead code detection...[/bold]")
-            dead = DeadCodeDetector(gb, current, cfg.entry_points).analyze()
+            dead = DeadCodeDetector(gb, current, cfg.entry_points, cfg.entry_point_patterns,
+                                    cfg.dead_code_dispositions or None).analyze()
             self._advance("pb-dead", 100)
             self._log(f"  Dead [red]{dead.dead_count}[/red]  Deactivated [yellow]{dead.deactivated_count}[/yellow]")
 

@@ -11,7 +11,7 @@ from rag_engine.models import (
 )
 from rag_engine.core.ast_builder import (
     get_text, find_nodes, find_child,
-    compute_cyclomatic_complexity, compute_nesting_depth, extract_data_access,
+    compute_cyclomatic_complexity, compute_nesting_depth, declared_names, extract_data_access,
 )
 
 _CPP_LANGUAGE = Language(tscpp.language())
@@ -35,6 +35,7 @@ class CodeParser:
             includes=self._extract_includes(root, source),
             raw_source=source,
             class_defs=self._extract_class_defs(root, source, file_path),
+            file_scope_objects=self._file_scope_objects(root, source),
         )
 
     def parse_directory(self, dir_path: str, pattern: str = "**/*.cpp") -> Dict[str, ParseResult]:
@@ -152,6 +153,8 @@ class CodeParser:
                 body_start_line=body_node.start_point[0] + 1 if body_node else 0,
                 is_override=is_override,
                 preproc_guard=self._preproc_guard(node, source),
+                is_extern_c=self._in_extern_c(node, source),
+                local_names=declared_names(body_node, source) if body_node else set(),
             )
         except Exception as exc:
             logger.debug(f"parse_function error: {exc}")
@@ -195,6 +198,51 @@ class CodeParser:
         is_override, is_final = 'override' in specs, 'final' in specs
         has_keyword = any(c.type == 'virtual' for c in node.children)
         return has_keyword or is_override or is_final, is_override, is_final
+
+    @staticmethod
+    def _in_extern_c(node: Node, source: bytes) -> bool:
+        parent = node.parent
+        while parent is not None:
+            if parent.type == 'linkage_specification':
+                value = parent.child_by_field_name('value')
+                if value is not None and get_text(value, source).strip() == '"C"':
+                    return True
+            parent = parent.parent
+        return False
+
+    def _file_scope_objects(self, root: Node, source: bytes) -> List[Tuple[str, Optional[str]]]:
+        """Types of the objects defined at file or namespace scope (``static Mgr g_mgr;``)."""
+        found: List[Tuple[str, Optional[str]]] = []
+
+        def walk(node: Node, scope: Optional[str], only_alternatives: bool = False) -> None:
+            for child in node.children:
+                if only_alternatives and child.type not in ('preproc_else', 'preproc_elif'):
+                    continue
+                if child.type == 'namespace_definition':
+                    name = child.child_by_field_name('name')
+                    walk(child, '::'.join(p for p in (scope, get_text(name, source).strip() if name else None) if p) or None)
+                elif child.type in (*_PREPROC_BRANCHES, 'linkage_specification', 'declaration_list'):
+                    condition = child.child_by_field_name('condition') if child.type in ('preproc_if', 'preproc_elif') else None
+                    # under #if 0 only the #else / #elif branches are compiled
+                    walk(child, scope, condition is not None and get_text(condition, source).strip() in ('0', 'false'))
+                elif child.type == 'declaration':
+                    type_node = child.child_by_field_name('type')
+                    if (type_node is not None and type_node.type in ('type_identifier', 'qualified_identifier', 'template_type')
+                            and any(self._is_object_declarator(d) for d in child.children_by_field_name('declarator'))):
+                        found.append((get_text(type_node, source).strip(), scope))
+
+        walk(root, None)
+        return found
+
+    @staticmethod
+    def _is_object_declarator(declarator: Node) -> bool:
+        """A plain object or array of objects; not a pointer, a reference or a function declaration."""
+        node: Optional[Node] = declarator
+        if node is not None and node.type == 'init_declarator':
+            node = node.child_by_field_name('declarator')
+        while node is not None and node.type == 'array_declarator':
+            node = node.child_by_field_name('declarator')
+        return node is not None and node.type in ('identifier', 'qualified_identifier')
 
     @staticmethod
     def _preproc_guard(node: Node, source: bytes) -> Optional[str]:
@@ -388,6 +436,8 @@ class CodeParser:
             is_override=is_override,
             is_final=is_final,
             has_body=member.type == 'function_definition',
+            is_static=any(c.type == 'storage_class_specifier' and get_text(c, source).strip() == 'static'
+                          for c in member.children),
             parameters=parameters,
         )
 

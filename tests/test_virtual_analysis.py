@@ -89,6 +89,9 @@ def test_inventory_lists_the_root_virtual_functions():
     inv = _inventory(result)
     assert {'Sensor::process()', 'Sensor::read()', 'Sensor::selfTest()'} <= set(inv)
     assert not any(k.startswith(('TemperatureSensor::', 'PressureSensor::', 'AltitudeSensor::')) for k in inv)
+    # the destructor is run by the compiler when an instantiated subclass is destroyed: an implicit entry point
+    assert inv['Sensor::~Sensor()'].reachable
+    assert not _inventory(_sensor_result(entry_points=['nothing_here']))['Sensor::process()'].reachable
 
 
 def test_process_is_overridden_reachable_and_called_from_update():
@@ -140,6 +143,8 @@ def test_reachability_depends_on_the_entry_points():
     assert all(not o.reachable for o in inv['Sensor::process()'].overridden_by)
     temperature_read = next(o for o in inv['Sensor::read()'].overridden_by if o.function == 'TemperatureSensor::read()')
     assert temperature_read.reachable
+    bare = _inventory(_sensor_result(entry_points=['updateTemperature']))   # a bare method name resolves too
+    assert next(o for o in bare['Sensor::read()'].overridden_by if o.function == 'TemperatureSensor::read()').reachable
     assert not _inventory(_sensor_result(entry_points=['nothing_here']))['Sensor::process()'].reachable
 
 
@@ -150,6 +155,17 @@ def test_a_built_graph_builder_can_be_passed_in():
     result = VirtualAnalyzer(results, results, graph_builder=gb).analyze()
     assert _inventory(result)['Sensor::process()'].call_sites == [
         s for s in gb.call_sites if s.target == 'Sensor::process()']
+
+
+def test_virtuals_reached_only_from_an_isr_use_the_entry_point_patterns(tmp_path):
+    (tmp_path / 'a.cpp').write_text(
+        'class Base { public: virtual void f() {} };\nclass Derived : public Base { public: void f() override {} };\n'
+        'void TIMER_IRQHandler() { Derived d; Base* b = &d; b->f(); }\nint main() { return 0; }\n')
+    results = CodeParser().parse_directory(str(tmp_path))
+    inv = _inventory(VirtualAnalyzer(results, results).analyze())
+    assert inv['Base::f()'].reachable and [o.reachable for o in inv['Base::f()'].overridden_by] == [True]
+    inv = _inventory(VirtualAnalyzer(results, results, entry_point_patterns=[]).analyze())
+    assert not inv['Base::f()'].reachable and [o.reachable for o in inv['Base::f()'].overridden_by] == [False]
 
 
 def test_out_of_line_virtuals_take_part_in_the_change_classification():

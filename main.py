@@ -63,13 +63,15 @@ def analyze(
 
     def run_virtual():
         return VirtualAnalyzer(base_results, current_results, graph_builder=gb,
-                               entry_points=cfg.entry_points).analyze()
+                               entry_points=cfg.entry_points,
+                               entry_point_patterns=cfg.entry_point_patterns).analyze()
 
     def run_coupling():
         return CouplingAnalyzer(current_results, gb, search, lru_doc_texts).analyze()
 
     def run_dead():
-        return DeadCodeDetector(gb, current_results, cfg.entry_points).analyze()
+        return DeadCodeDetector(gb, current_results, cfg.entry_points, cfg.entry_point_patterns,
+                                cfg.dead_code_dispositions or None).analyze()
 
     def run_standards():
         return StandardsValidator(cfg, current_results).analyze()

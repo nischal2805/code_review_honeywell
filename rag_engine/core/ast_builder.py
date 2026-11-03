@@ -74,6 +74,17 @@ def _declared_name(declarator: Node, source: bytes) -> Optional[str]:
     return get_text(node, source) if node is not None else None
 
 
+def declared_names(body: Node, source: bytes) -> Set[str]:
+    """Names of the variables declared anywhere inside *body* (parameters of the function itself excluded)."""
+    names: Set[str] = set()
+    for decl_node in find_nodes(body, 'declaration', 'for_range_loop', 'parameter_declaration'):
+        for declarator in decl_node.children_by_field_name('declarator'):
+            name = _declared_name(declarator, source)
+            if name:
+                names.add(name)
+    return names
+
+
 def extract_data_access(body: Node, source: bytes) -> Tuple[Set[str], Set[str]]:
     """Return ``(reads, writes)``: the names a function body reads and modifies.
 
@@ -84,12 +95,7 @@ def extract_data_access(body: Node, source: bytes) -> Tuple[Set[str], Set[str]]:
     """
     # shortcut: locals are collected function-wide, so a local shadowing a member or global
     # hides that access; upgrade to per-scope tracking if shadowing matters.
-    local: Set[str] = set()
-    for decl_node in find_nodes(body, 'declaration', 'for_range_loop', 'parameter_declaration'):
-        for declarator in decl_node.children_by_field_name('declarator'):
-            name = _declared_name(declarator, source)
-            if name:
-                local.add(name)
+    local = declared_names(body, source)
 
     reads: Set[str] = set()
     writes: Set[str] = set()

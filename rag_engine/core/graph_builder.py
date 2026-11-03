@@ -1,7 +1,8 @@
 from __future__ import annotations
+import fnmatch
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 import networkx as nx
 from loguru import logger
 
@@ -102,6 +103,32 @@ def _strip_comments(text: str) -> str:
             result.append(text[i])
             i += 1
     return ''.join(result)
+
+
+_DEAD_BRANCH = re.compile(r'\b(?:if|while)\s*\(\s*(?:0|false)\s*\)\s*\{')
+
+
+def _blank_dead_branches(text: str) -> str:
+    """Blank (newlines kept) the ``{...}`` bodies of ``if (0)``, ``if (false)`` and ``while (0)``.
+
+    Run on comment-stripped text, so braces in strings and comments are already gone.  Code that
+    follows a ``return`` is not touched here; the control-flow analyzer reports it as a fragment.
+    """
+    # shortcut: only braced bodies behind the literals 0/false; upgrade by evaluating constant expressions.
+    out: List[str] = []
+    pos = 0
+    for m in _DEAD_BRANCH.finditer(text):
+        if m.start() < pos:
+            continue   # inside a body that is already blanked
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += (text[i] == '{') - (text[i] == '}')
+            i += 1
+        end = i - 1 if depth == 0 else i   # keep the closing brace
+        out += [text[pos:m.end()], re.sub(r'[^\n]', ' ', text[m.end():end])]
+        pos = end
+    out.append(text[pos:])
+    return ''.join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +389,11 @@ _BARE_CALL = re.compile(r'(?<![\w.:])(?<!->)([A-Za-z_]\w*)\s*\(')
 _LOCAL_DECL = re.compile(r'\b([A-Z][A-Za-z_]\w*)\s*([\*&]?)\s+([a-z_]\w*)\s*(?:=|;|\()')
 _CTOR_LOCAL = re.compile(r'\b([A-Za-z_]\w*)\s+[A-Za-z_]\w*\s*;')
 _CTOR_NEW = re.compile(r'\bnew\s+([A-Za-z_]\w*)\s*[\(;]')
-_ARG_CALL = re.compile(r'\b[A-Za-z_]\w*\s*\(([^)]*)\)')
+# The argument text is a lookahead so scanning resumes inside the parentheses: if (reg(cb)) finds reg(cb).
+_ARG_CALL = re.compile(r'\b([A-Za-z_]\w*)\s*\((?=([^)]*)\))')
+# Keywords that are followed by a parenthesis but are not calls.
+_NOT_CALLS = frozenset({'if', 'while', 'for', 'switch', 'return', 'sizeof', 'catch', 'alignof', 'decltype',
+                        'static_assert', 'throw'})
 # T x;  T x(...);  T x = ...;  T x{...};  T x[n];  -- a non-pointer object
 _LOCAL_OBJECT = re.compile(r'(?<![\w:.>])((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s+[A-Za-z_]\w*\s*[;=({\[]')
 _NEW_OBJECT = re.compile(r'\bnew\s+((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)')
@@ -401,7 +432,8 @@ class CallGraphBuilder:
 
         # Strip comments before any regex scanning so that commented-out calls
         # are not treated as live call sites.
-        work = [(fn, _strip_comments(fn.body)) for result in self._results.values() for fn in result.functions]
+        work = [(fn, _blank_dead_branches(_strip_comments(fn.body)))
+                for result in self._results.values() for fn in result.functions]
         self.instantiated_classes = self._find_instantiated(work)
 
         # Phase 2: resolve call edges for every function.
@@ -419,24 +451,80 @@ class CallGraphBuilder:
         )
         return self._graph
 
-    def find_reachable_from(self, function_name: str) -> Set[str]:
-        """Return all sig_keys reachable from *function_name*.
+    @property
+    def graph(self) -> CallGraph:
+        return self._graph
 
-        Accepts both a full sig_key (``"main()"``) and a bare name (``"main"``).
+    def resolve_entry_points(self, names: Iterable[str],
+                             patterns: Iterable[str] = ()) -> Tuple[Set[str], List[str]]:
+        """Graph nodes named by *names* or matching *patterns*, and a warning for each name that is
+        missing or ambiguous.
+
+        A name is a sig_key (``"Vehicle::start()"``), a qualified name (``"Vehicle::start"``) or a
+        bare short name (``"start"``, whatever the parameters); a name matching several functions
+        resolves to all of them.  A pattern is an fnmatch pattern for the short name of a free
+        function, or for the qualified name of any function when it contains ``::``.  Functions under
+        ``#if 0`` are never entry points: a name matching only such functions is a warning.
         """
-        node = self._resolve_entry_point(function_name)
-        if node is None:
-            return set()
-        return nx.descendants(self._graph, node)
+        nodes: Set[str] = set()
+        warnings: List[str] = []
+        for name in names:
+            name = name.strip()
+            found = {name} if name in self._graph else (self._by_qualified if '::' in name else self._by_short).get(name, set())
+            matches = {k for k in found if not self._all_funcs[k].never_built}
+            if not found:
+                warnings.append(f"Entry point '{name}' not found in the call graph")
+            elif not matches:
+                guards = sorted({str(self._all_funcs[k].preproc_guard) for k in found})
+                warnings.append(f"Entry point '{name}' only matches code excluded from the build "
+                                f"by `#if {' / '.join(guards)}`")
+            elif len(matches) > 1:
+                warnings.append(f"Entry point '{name}' is ambiguous; using all {len(matches)} matches: "
+                                + ', '.join(sorted(matches)))
+            nodes |= matches
+        for warning in warnings:
+            logger.warning(warning)
+        patterns = list(patterns)
+        nodes |= {key for key, fn in self._all_funcs.items()
+                  if not fn.never_built and any(self._matches_pattern(fn, p) for p in patterns)}
+        return nodes, warnings
+
+    @staticmethod
+    def _matches_pattern(fn: FunctionDef, pattern: str) -> bool:
+        if '::' in pattern:
+            return fnmatch.fnmatchcase(fn.name, pattern)
+        return fn.class_name is None and fnmatch.fnmatchcase(fn.name.rsplit('::', 1)[-1], pattern)
+
+    def implicit_entry_points(self) -> Set[str]:
+        """Constructors and destructors of instantiated classes and of their ancestors: the compiler
+        calls them, so no call edge ever points at them.  Call after build()."""
+        # shortcut: a class instantiated only in dead code still counts; upgrade with reachability-aware instantiation.
+        classes = set(self.instantiated_classes)
+        for cls in self.instantiated_classes:
+            classes.update(self.hierarchy.ancestors(cls))
+        found: Set[str] = set()
+        for sig_key, fn in self._all_funcs.items():
+            if fn.class_name in classes and not fn.never_built:
+                own = fn.class_name.rsplit('::', 1)[-1]
+                if fn.name.rsplit('::', 1)[-1] in (own, '~' + own):
+                    found.add(sig_key)
+        return found
+
+    def reachable_from(self, nodes: Iterable[str]) -> Set[str]:
+        """*nodes* and everything they reach."""
+        reachable = {n for n in nodes if n in self._graph}
+        for node in list(reachable):
+            reachable |= nx.descendants(self._graph, node)
+        return reachable
+
+    def find_reachable_from(self, function_name: str) -> Set[str]:
+        """Return all sig_keys reachable from *function_name* (any form resolve_entry_points accepts)."""
+        nodes, _ = self.resolve_entry_points([function_name])
+        return set().union(*(nx.descendants(self._graph, n) for n in nodes))
 
     def find_unreachable(self, entry_points: List[str]) -> Set[str]:
-        reachable: Set[str] = set()
-        for ep in entry_points:
-            node = self._resolve_entry_point(ep)
-            if node:
-                reachable.add(node)
-                reachable |= self.find_reachable_from(ep)
-        return set(self._graph.nodes) - reachable
+        nodes, _ = self.resolve_entry_points(entry_points)
+        return set(self._graph.nodes) - self.reachable_from(nodes)
 
     def get_function(self, name: str) -> FunctionDef | None:
         # Accept both sig_key and bare name for convenience.
@@ -448,24 +536,6 @@ class CallGraphBuilder:
         return None
 
     # ── Internal helpers ────────────────────────────────────────────────────
-
-    def _resolve_entry_point(self, name: str) -> Optional[str]:
-        """Map an entry-point name (e.g. ``"main"``) to its sig_key graph node."""
-        if name in self._graph:
-            return name
-        matches = [k for k, fn in self._all_funcs.items() if fn.name == name]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            zero_arg = [k for k in matches if not self._all_funcs[k].parameters]
-            if zero_arg:
-                return zero_arg[0]
-            logger.warning(
-                f"Entry point '{name}' is ambiguous ({len(matches)} overloads). "
-                f"Using first match: {matches[0]}"
-            )
-            return matches[0]
-        return None
 
     def _build_short_name_index(self, known_sig_keys: Set[str]) -> Dict[str, Set[str]]:
         """Map short base name → {sig_key, …}.
@@ -515,7 +585,12 @@ class CallGraphBuilder:
         """Classes that are constructed somewhere: local objects, ``new T``, object-typed fields."""
         found: Set[str] = set()
         # shortcut: field types count as instantiated even if the owner never is; upgrade with whole-program construction analysis.
-        # shortcut: file-scope objects, make_unique/make_shared and container elements are not seen.
+        # shortcut: make_unique/make_shared and container elements are not seen.
+        for result in self._results.values():
+            for type_, scope in result.file_scope_objects:
+                cls = self.hierarchy.resolve_class(bare_type(type_), scope)
+                if cls:
+                    found.add(cls)
         for cdef in self.hierarchy.classes.values():
             for f in cdef.fields:
                 if '*' not in f.type_ and '&' not in f.type_:
@@ -523,6 +598,8 @@ class CallGraphBuilder:
                     if cls:
                         found.add(cls)
         for fn, body in work:
+            if fn.never_built:
+                continue
             scope = self._scope(fn)
             for pattern in (_LOCAL_OBJECT, _NEW_OBJECT):
                 for m in pattern.finditer(body):
@@ -541,7 +618,7 @@ class CallGraphBuilder:
         self._member_calls(fn, body, out)
         self._bare_calls(fn, body, out)
         self._constructor_calls(body, out)
-        self._callback_calls(body, out)
+        self._callback_calls(fn, body, out)
         self._self_calls(fn, body, out)
         return out
 
@@ -670,13 +747,19 @@ class CallGraphBuilder:
                 for sig_key in sorted(self._by_qualified.get(f"{ctor_class}::{ctor_class}", ())):
                     out.call(sig_key, 'constructor', m.start())
 
-    def _callback_calls(self, body: str, out: _Calls) -> None:
-        """Free-function names passed as arguments (callbacks / function pointers)."""
+    def _callback_calls(self, fn: FunctionDef, body: str, out: _Calls) -> None:
+        """Free-function names passed as arguments (callbacks / function pointers); a parameter or
+        local of the caller that happens to share a function's name is not one."""
+        own = {re.sub(r'[*&\s]', '', p.name) for p in fn.parameters} | fn.local_names
         for call in _ARG_CALL.finditer(body):
-            for arg in re.finditer(r'\b([A-Za-z_]\w*)\b(?!\s*\()', call.group(1)):   # not a nested call
+            if call.group(1) in _NOT_CALLS:
+                continue
+            for arg in re.finditer(r'\b([A-Za-z_]\w*)\b(?!\s*\()', call.group(2)):   # not a nested call
+                if arg.group(1) in own:
+                    continue
                 for sig_key in sorted(self._by_short.get(arg.group(1), ())):
                     if '::' not in sig_key.split('(')[0]:
-                        out.call(sig_key, 'callback', call.start(1) + arg.start())
+                        out.call(sig_key, 'callback', call.start(2) + arg.start())
 
     def _self_calls(self, fn: FunctionDef, body: str, out: _Calls) -> None:
         """Direct self-recursion by plain or qualified name.

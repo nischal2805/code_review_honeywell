@@ -8,6 +8,12 @@ ollama_enabled: true
 max_workers: 4
 entry_points:
   - main
+entry_point_patterns:
+  - '*_IRQHandler'
+  - '*_ISR'
+  - 'ISR_*'
+  - '*Task'
+dead_code_dispositions: ''   # YAML of reviewed findings: findings: {DC-FUNC-1A2B3C4D: {status, justification, reviewer}}
 lru_names:
   - Motor
   - Battery

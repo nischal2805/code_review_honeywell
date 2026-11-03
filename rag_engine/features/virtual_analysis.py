@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from loguru import logger
 
+from rag_engine.config import DEFAULT_ENTRY_POINT_PATTERNS
 from rag_engine.core.class_hierarchy import ClassHierarchy, MethodInfo
 from rag_engine.core.graph_builder import CallGraphBuilder
 from rag_engine.models import CallSite, FunctionDef, ParseResult, VirtualChange
@@ -51,12 +52,17 @@ class VirtualAnalysisResult:
 class VirtualAnalyzer:
     def __init__(self, base_results: Dict[str, ParseResult], current_results: Dict[str, ParseResult],
                  graph_builder: Optional[CallGraphBuilder] = None,
-                 entry_points: Optional[List[str]] = None) -> None:
-        """*graph_builder* is a builder over *current_results* (built here if it is not yet); omitted, one is made."""
+                 entry_points: Optional[List[str]] = None,
+                 entry_point_patterns: Optional[List[str]] = None) -> None:
+        """*graph_builder* is a builder over *current_results* (built here if it is not yet); omitted, one is made.
+
+        Entry points resolve as in the dead code analysis: *entry_points* names plus functions matching
+        *entry_point_patterns* (default: the Config default)."""
         self._base = base_results
         self._current = current_results
         self._graph = graph_builder
         self._entry_points = list(entry_points) if entry_points else ['main']
+        self._patterns = list(DEFAULT_ENTRY_POINT_PATTERNS if entry_point_patterns is None else entry_point_patterns)
 
     def analyze(self) -> VirtualAnalysisResult:
         gb = self._graph or CallGraphBuilder(self._current)
@@ -156,8 +162,9 @@ class VirtualAnalyzer:
     def _inventory(self, gb: CallGraphBuilder) -> List[VirtualFunctionInfo]:
         hierarchy = gb.hierarchy
         funcs = {fn.sig_key: fn for r in self._current.values() for fn in r.functions}
-        reachable = set(funcs) - gb.find_unreachable(self._entry_points)
-        if funcs and not reachable:
+        entries, _ = gb.resolve_entry_points(self._entry_points, self._patterns)
+        reachable = gb.reachable_from(entries | gb.implicit_entry_points())
+        if funcs and not entries:
             logger.warning(f"None of the entry points {self._entry_points} is in the call graph; "
                            "no virtual function will be reported reachable")
         sites: Dict[str, List[CallSite]] = {}

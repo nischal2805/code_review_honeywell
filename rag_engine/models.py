@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Literal
+from typing import List, Optional, Set, Tuple, Literal
 
 
 @dataclass
@@ -40,6 +40,13 @@ class FunctionDef:
     # Condition text of the nearest enclosing #if/#ifdef/#elif ("0" for ``#if 0``);
     # #ifndef is ignored so include guards do not count.
     preproc_guard: Optional[str] = None
+    is_extern_c: bool = False   # defined inside an ``extern "C"`` linkage specification
+    local_names: Set[str] = field(default_factory=set)   # variables declared in the body (parameters not included)
+
+    @property
+    def never_built(self) -> bool:
+        """Under ``#if 0`` / ``#if false``: the compiler never sees it."""
+        return self.preproc_guard in ('0', 'false')
 
     @property
     def qualified_name(self) -> str:
@@ -121,6 +128,7 @@ class MethodDecl:
     is_final: bool
     has_body: bool        # defined inline inside the class body
     parameters: List[Parameter] = field(default_factory=list)   # as declared, with default values
+    is_static: bool = False
 
 
 @dataclass
@@ -143,6 +151,9 @@ class ParseResult:
     includes: List[str]
     raw_source: bytes
     class_defs: List[ClassDef] = field(default_factory=list)
+    # (type as written, enclosing namespace or None) of each object defined at file or namespace scope;
+    # pointers, references and function declarations are left out.
+    file_scope_objects: List[Tuple[str, Optional[str]]] = field(default_factory=list)
 
 
 @dataclass
@@ -179,12 +190,23 @@ class Violation:
 
 @dataclass
 class DeadCodeItem:
-    name: str
+    name: str                 # function sig_key; the snippet of a fragment; the name of a variable
     file_path: str
     line_number: int
-    category: Literal['dead_code', 'deactivated_code', 'unused_export', 'dead_fragment']
+    category: Literal['dead_code', 'deactivated_code', 'unused_export', 'dead_fragment', 'unused_variable']
     do178c_disposition: Literal['Remove', 'Justify as Deactivated', 'Investigate', 'Fix Fragment']
     coverage_impact: str
+    finding_id: str = ''      # stable across line shifts, e.g. DC-FUNC-1A2B3C4D
+    end_line: int = 0
+    symbol_type: Literal['function', 'method', 'fragment', 'variable', 'parameter'] = 'function'
+    function_name: Optional[str] = None   # sig_key of the function the finding is (in)
+    reason: str = ''
+    confidence: Literal['high', 'medium', 'low'] = 'medium'
+    evidence: List[str] = field(default_factory=list)
+    removal_impact: List[str] = field(default_factory=list)
+    review_status: str = 'open'
+    reviewer_justification: Optional[str] = None
+    reviewer: Optional[str] = None
 
 
 @dataclass
