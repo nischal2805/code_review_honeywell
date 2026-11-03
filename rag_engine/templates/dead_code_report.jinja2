@@ -2,23 +2,88 @@
 Generated: {{ report_date }}
 DAL Level: {{ dal_level }}
 
+## Analysis Scope
+- Functions analysed: {{ total_functions }}
+- Entry points ({{ entry_points | length }}): {{ entry_points | join(', ') if entry_points else 'none' }}
+- Constructors and destructors of instantiated classes are implicit entry points.
+- Bodies of `if (0)`, `if (false)` and `while (0)` do not count as calls.
+
+## Warnings
+{% for w in warnings %}
+- {{ w }}
+{% else %}
+No warnings.
+{% endfor %}
+
 ## Summary
-Total items: {{ items | length }}
+Total findings: {{ items | length }}
 Coverage impact: {{ coverage_impact }}
+
+| Category | Findings |
+|----------|----------|
+{% for category, count in counts_by_category.items() %}
+| {{ category }} | {{ count }} |
+{% endfor %}
+
+| Confidence | Findings |
+|------------|----------|
+{% for confidence, count in counts_by_confidence.items() %}
+| {{ confidence }} | {{ count }} |
+{% endfor %}
 
 {% if llm_narrative %}
 ## AI Certification Assessment
 
 {{ llm_narrative }}
+
+{% endif %}
+## Findings
+{% if items %}
+
+| ID | File | Function/Symbol | Lines | Category | Disposition | Reason | Confidence | Status |
+|----|------|-----------------|-------|----------|-------------|--------|------------|--------|
+{% for i in items %}
+| {{ i.finding_id }} | {{ i.file_path.split('\\')[-1].split('/')[-1] }} | {{ (i.name if i.symbol_type in ('function', 'method') else i.function_name ~ ' / ' ~ i.name) | replace('|', '\\|') }} | {{ i.line_number if i.end_line <= i.line_number else '%d-%d' % (i.line_number, i.end_line) }} | {{ i.category }} | {{ i.do178c_disposition }} | {{ i.reason | replace('|', '\\|') }} | {{ i.confidence }} | {{ i.review_status }} |
+{% endfor %}
+{% else %}
+
+No dead or deactivated code findings.
 {% endif %}
 
-## Items
+## Finding Details
+{% for i in items %}
 
-{% for item in items %}
-### {{ item.name }}
-- File: {{ item.file_path }}:{{ item.line_number }}
-- Category: {{ item.category }}
-- Disposition: {{ item.do178c_disposition }}
-- Coverage Impact: {{ item.coverage_impact }}
+### {{ i.finding_id }} — {{ i.name }}
+- File: {{ i.file_path }}:{{ i.line_number if i.end_line <= i.line_number else '%d-%d' % (i.line_number, i.end_line) }}
+- Function: {{ i.function_name }}
+- Category: {{ i.category }}
+- Disposition: {{ i.do178c_disposition }}
+- Confidence: {{ i.confidence }}
+- Reason: {{ i.reason }}
+- Coverage Impact: {{ i.coverage_impact }}
+- Review Status: {{ i.review_status }}{% if i.reviewer_justification %} — {{ i.reviewer_justification }}{% if i.reviewer %} (reviewer: {{ i.reviewer }}){% endif %}{% endif %}
 
+{% if i.evidence %}
+- Evidence:
+{% for e in i.evidence %}
+  - {{ e }}
 {% endfor %}
+{% endif %}
+{% if i.removal_impact %}
+- Removal Impact:
+{% for r in i.removal_impact %}
+  - {{ r }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+## Unresolved calls (conservative edges)
+{% if unresolved_calls %}
+These calls could not be resolved to one function; each is kept as an edge to every function of that name, which can hide dead code.
+
+{% for u in unresolved_calls %}
+- {{ u }}
+{% endfor %}
+{% else %}
+None.
+{% endif %}

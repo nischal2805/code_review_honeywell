@@ -1,0 +1,65 @@
+# Sensor templates for the generic sensor data analysis (stale / corrupt / debounce).
+# One engine checks every sensor; adding a sensor = adding an entry here.
+# Point `sensor_templates_file` in config.yaml at this file (or your own copy).
+#
+# Per sensor:
+#   name                  template name; also the C++ class to match unless class_name is set
+#   type, data_type, unit descriptive metadata
+#   class_name            C++ class to match ('' = use name)
+#   parameter_group       top of the hierarchy: Parameter Group -> I/O Group -> Sensor -> Data
+#   io_group              second level of the hierarchy
+#   valid_range           {min, max}  corrupt check: values outside are corrupt (min < max)
+#   sampling_interval_ms  expected update period
+#   stale                 {threshold_ms, detect_frozen}  no update / unchanged value longer than
+#                         threshold_ms is stale
+#   debounce              {enabled, threshold, count}  jumps larger than threshold are flagged
+#                         until `count` consecutive samples confirm the new value (count >= 1)
+#   corrupt               {range_check}  enable/disable the valid_range check
+# `defaults:` is deep-merged into every sensor; sensor keys win. A single sensor may instead be
+# given as a top-level `sensor:` mapping.
+defaults:
+  data_type: float
+  debounce: {enabled: true, count: 3}
+  corrupt: {range_check: true}
+  stale: {detect_frozen: true}
+
+sensors:
+  - name: TemperatureSensor
+    type: temperature
+    unit: Celsius
+    parameter_group: Temperature Parameter
+    io_group: Temperature I/O Group
+    valid_range: {min: -54, max: 54}
+    sampling_interval_ms: 100
+    stale: {threshold_ms: 500}
+    debounce: {threshold: 2.0}
+
+  - name: PressureSensor
+    type: pressure
+    unit: Pascal
+    parameter_group: Pressure Parameter
+    io_group: Pressure I/O Group
+    valid_range: {min: 0, max: 110000}
+    sampling_interval_ms: 50
+    stale: {threshold_ms: 200}
+    debounce: {threshold: 500.0}
+
+  - name: AltitudeSensor
+    type: altitude
+    unit: Feet
+    parameter_group: Altitude Parameter
+    io_group: Altitude I/O Group
+    valid_range: {min: -1000, max: 60000}
+    sampling_interval_ms: 100
+    stale: {threshold_ms: 1000}
+    debounce: {threshold: 50.0}
+
+  - name: SpeedSensor
+    type: speed
+    unit: Knots
+    parameter_group: Speed Parameter
+    io_group: Speed I/O Group
+    valid_range: {min: 0, max: 600}
+    sampling_interval_ms: 100
+    stale: {threshold_ms: 300}
+    debounce: {threshold: 5.0}

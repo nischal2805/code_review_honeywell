@@ -1,0 +1,35 @@
+defaults:
+  data_type: float
+  debounce: {enabled: true, count: 3}
+  corrupt: {range_check: true}
+sensors:
+  - name: TemperatureSensor
+    type: temperature
+    unit: Celsius
+    parameter_group: Temperature Parameter
+    io_group: Temperature I/O Group
+    valid_range: {min: -54, max: 54}
+    sampling_interval_ms: 100
+    stale: {threshold_ms: 500}
+    debounce: {threshold: 2.0}
+  - name: PressureSensor
+    type: pressure
+    unit: Pascal
+    parameter_group: Pressure Parameter
+    io_group: Pressure I/O Group
+    valid_range: {min: 0, max: 110000}
+    sampling_interval_ms: 50
+    stale: {threshold_ms: 200}
+    debounce: {threshold: 500.0}
+  - name: AltitudeSensor
+    type: altitude
+    unit: Feet
+    valid_range: {min: -1000, max: 60000}
+    stale: {threshold_ms: 1000}
+    debounce: {threshold: 50.0}
+  - name: SpeedSensor
+    type: speed
+    unit: Knots
+    valid_range: {min: 0, max: 600}
+    stale: {threshold_ms: 300}
+    debounce: {threshold: 5.0}

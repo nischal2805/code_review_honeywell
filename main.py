@@ -2,28 +2,59 @@ from __future__ import annotations
 import os
 os.environ.setdefault('USE_TF', '0')
 os.environ.setdefault('USE_TORCH', '1')
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 import typer
 from loguru import logger
 from tqdm import tqdm
 
-from rag_engine.config import load_config
-from rag_engine.core.embeddings import SemanticSearch
-from rag_engine.core.graph_builder import CallGraphBuilder
-from rag_engine.document_processor.code_reader import CodeReader
-from rag_engine.document_processor.doc_reader import DocReader
-from rag_engine.features.coupling_analysis import CouplingAnalyzer
-from rag_engine.features.dead_code_detector import DeadCodeDetector
-from rag_engine.features.standards_validator import StandardsValidator
-from rag_engine.features.virtual_analysis import VirtualAnalyzer
-from rag_engine.knowledge_base.index_manager import IndexManager
+from rag_engine.config import Config, load_config
+from rag_engine.features.function_effect import FunctionEffectAnalyzer, format_effect
+from rag_engine.features.sensor_analysis import SensorFinding
+from rag_engine.features.sensor_data_checker import check_samples, load_samples_csv, summarize
+from rag_engine.features.sensor_template import load_sensor_templates
+from rag_engine.features.virtual_analysis import format_virtual_function
+from rag_engine.llm.offline_qa import answer_question, function_names, not_found_message
 from rag_engine.llm.ollama_client import OllamaClient
 from rag_engine.llm.rag_narrator import RAGNarrativeGenerator
-from rag_engine.reporting.checklist_filler import ChecklistFiller
+from rag_engine.pipeline import AnalysisResults, InputError, run_pipeline
 from rag_engine.reporting.report_generator import ReportGenerator
 
 app = typer.Typer(name='rag-engine', help='DO-178C Codebase Analysis Engine')
+
+_CONFIG = typer.Option('config.yaml', help='Path to config.yaml')
+_TEMPLATES = typer.Option(None, '--sensor-templates', '--templates',
+                          help='Sensor template YAML (overrides sensor_templates_file in the config)')
+
+
+def _fail(message: str) -> typer.Exit:
+    typer.echo(message, err=True)
+    return typer.Exit(1)
+
+
+def _load(config: str, templates: Optional[str] = None) -> Config:
+    try:
+        cfg = load_config(config)
+    except ValueError as exc:
+        raise _fail(f"Error: {exc}")
+    if templates:
+        if not Path(templates).expanduser().exists():
+            raise _fail(f"Sensor templates file not found: {templates}")
+        cfg.sensor_templates_file = str(Path(templates).expanduser().resolve())
+    return cfg
+
+
+def _model(cfg: Config, codebase: str, **kwargs: Any) -> AnalysisResults:
+    """The analyses without semantic search or reports: what the query commands need."""
+    return _run(cfg, codebase, use_semantic_search=False, write_reports=False, **kwargs)
+
+
+def _run(cfg: Config, codebase: str, **kwargs: Any) -> AnalysisResults:
+    try:
+        return run_pipeline(cfg, codebase, **kwargs)
+    except InputError as exc:   # anything else is a bug: let it show its traceback
+        raise _fail(f"Error: {exc}")
 
 
 @app.command()
@@ -32,135 +63,163 @@ def analyze(
     base_build: Optional[str] = typer.Option(None, help='Base build dir for virtual analysis diff'),
     lru_docs: Optional[str] = typer.Option(None, help='Dir with LRU PDF/DOCX documents'),
     standards_file: Optional[str] = typer.Option(None, help='Path to custom DAL standards YAML/JSON/PDF/DOCX file'),
-    config: str = typer.Option('config.yaml', help='Path to config.yaml'),
+    sensor_templates: Optional[str] = _TEMPLATES,
+    config: str = _CONFIG,
     output_format: str = typer.Option('docx', help='Output format: docx or markdown'),
+    semantic_search: bool = typer.Option(True, '--semantic-search/--no-semantic-search',
+                                         help='Use the embedding model for coupling analysis (keyword matching without)'),
 ) -> None:
-    """Run all four DO-178C analyses and generate §11-compliant reports."""
-    cfg = load_config(config)
+    """Run all DO-178C analyses and generate §11-compliant reports."""
+    cfg = _load(config, sensor_templates)
     logger.info(f"RAG Engine — DAL {cfg.dal_level}, output: {cfg.output_dir}")
     if standards_file:
         if not Path(standards_file).expanduser().exists():
-            typer.echo(f"Standards file not found: {standards_file}", err=True)
-            raise typer.Exit(1)
+            raise _fail(f"Standards file not found: {standards_file}")
         cfg.standards_file = standards_file
 
-    reader = CodeReader(cache_dir=cfg.cache_dir)
-    current_results = reader.read_directory(codebase)
-    if not current_results:
-        typer.echo(f"No C++ files found in {codebase}", err=True)
-        raise typer.Exit(1)
+    with tqdm(total=100, desc='Analysis') as bar:
+        def progress(step: str, pct: int) -> None:
+            bar.set_description(step)
+            bar.update(pct - bar.n)
 
-    base_results = reader.read_directory(base_build) if base_build else current_results
-
-    all_functions = reader.all_functions(current_results)
-    gb = CallGraphBuilder(current_results)
-    gb.build()
-
-    search = SemanticSearch(model_name=cfg.embedding_model)
-    search.index_functions(all_functions)
-
-    lru_doc_texts = DocReader().read_lru_documents(lru_docs) if lru_docs else {}
-
-    def run_virtual():
-        return VirtualAnalyzer(base_results, current_results).analyze()
-
-    def run_coupling():
-        return CouplingAnalyzer(current_results, gb, search, lru_doc_texts).analyze()
-
-    def run_dead():
-        return DeadCodeDetector(gb, current_results, cfg.entry_points).analyze()
-
-    def run_standards():
-        return StandardsValidator(cfg, current_results).analyze()
-
-    tasks = {
-        'virtual': run_virtual,
-        'coupling': run_coupling,
-        'dead_code': run_dead,
-        'standards': run_standards
-}
-    results = {}
-
-    for name, fn in tqdm(tasks.items(), desc='Analyses'):
-        try:
-            results[name] = fn()
-            logger.info(f"  done: {name}")
-        except Exception as exc:
-            logger.error(f"  failed {name}: {exc}")
-            raise
-
-    llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
-    llm_narratives: dict = {}
-    if cfg.ollama_enabled and llm.is_available():
-        logger.info(f"LLM enrichment via {cfg.ollama_model}")
-        rag = RAGNarrativeGenerator(llm, search)
-        rag_tasks = {
-            'virtual': (
-                "virtual function change reverification DO-178C category",
-                f"Virtual function analysis:\n"
-                f"Added: {results['virtual'].summary.get('added', 0)}, "
-                f"Removed: {results['virtual'].summary.get('removed', 0)}, "
-                f"Modified: {results['virtual'].summary.get('modified', 0)}, "
-                f"Unchanged: {results['virtual'].summary.get('unchanged', 0)}.\n"
-                f"Changes: {[f'{c.function.name} ({c.do178c_category})' for c in results['virtual'].changes[:5]]}\n"
-                f"Assess reverification scope required per DO-178C §12."
-            ),
-            'coupling': (
-                "LRU control data coupling dependency interface",
-                f"Coupling analysis for {len(results['coupling'].lru_impacts)} LRUs.\n"
-                f"Risk levels: {[(k, v.risk_level) for k, v in results['coupling'].lru_impacts.items()]}\n"
-                f"Assess control/data coupling impact on DAL {cfg.dal_level} certification."
-            ),
-            'dead_code': (
-                "unreachable function structural coverage",
-                f"Dead code analysis: {results['dead_code'].dead_count} dead functions, "
-                f"{results['dead_code'].deactivated_count} deactivated, "
-                f"out of {results['dead_code'].total_functions} total.\n"
-                f"Coverage impact: {results['dead_code'].structural_coverage_impact}\n"
-                f"Assess DO-178C §6.4.2.2 compliance and structural coverage risk."
-            ),
-            'standards': (
-                "MISRA C++ DO-178C code standard naming complexity violation",
-                f"Standards compliance: score {results['standards'].compliance_score:.1f}%, "
-                f"violations by severity: {results['standards'].violations_by_severity}.\n"
-                f"Top rules: {list(set(v.rule for v in results['standards'].violations[:10]))}\n"
-                f"Assess DO-178C §5.1 and MISRA C++ compliance status."
-            ),
-        }
-        k_map = {'virtual': 8, 'coupling': 8, 'dead_code': 3, 'standards': 5}
-        for key, (query, summary) in rag_tasks.items():
-            try:
-                narrative = rag.generate(query, summary, k=k_map.get(key, 8), max_tokens=800)
-                if narrative:
-                    llm_narratives[key] = narrative
-                    logger.info(f"  LLM narrative: {key}")
-            except Exception as exc:
-                logger.warning(f"  LLM failed for {key}: {exc}")
-
-    gen = ReportGenerator(cfg)
-    paths = gen.generate_all(results['virtual'], results['coupling'],
-                             results['dead_code'], results['standards'],
-                             format=output_format,  # type: ignore[arg-type]
-                             llm_narratives=llm_narratives)
-
-    ChecklistFiller(cfg).fill_sqa_checklist(results['virtual'], results['dead_code'], results['standards'])
+        results = _run(cfg, codebase, base_build=base_build, lru_docs=lru_docs, output_format=output_format,
+                       progress=progress, use_semantic_search=semantic_search)
 
     typer.echo(f"\nReports in {cfg.output_dir}/")
-    for p in paths:
+    for p in results.report_paths:
         typer.echo(f"  {p}")
-    typer.echo(f"  {cfg.output_dir}/sqa_checklist.md")
 
-    critical = results['standards'].violations_by_severity.get('CRITICAL', 0)
+    critical = results.standards.violations_by_severity.get('CRITICAL', 0)
     if critical > 0:
         typer.echo(f"\nWARNING: {critical} CRITICAL violation(s)", err=True)
         raise typer.Exit(1)
 
 
 @app.command()
+def virtuals(
+    codebase: str = typer.Argument(..., help='Path to C++ codebase directory'),
+    config: str = _CONFIG,
+) -> None:
+    """List the virtual functions, their overrides, callers and class hierarchies."""
+    cfg = _load(config)
+    cfg.sensor_templates_file = ''
+    result = _model(cfg, codebase).virtual
+    if not result.inventory:
+        typer.echo("No virtual functions found.")
+    for info in result.inventory:
+        typer.echo(format_virtual_function(info) + '\n')
+    if result.hierarchy_trees:
+        typer.echo("Class hierarchies:")
+        for tree in result.hierarchy_trees.values():
+            typer.echo(tree + '\n')
+
+
+@app.command()
+def effect(
+    codebase: str = typer.Argument(..., help='Path to C++ codebase directory'),
+    method: str = typer.Argument(..., help='Method name, e.g. updateTemperature or SensorManager::updateTemperature'),
+    config: str = _CONFIG,
+    output_format: str = typer.Option('markdown', help='Report format: docx or markdown'),
+) -> None:
+    """Show what a method does, what it touches and what is affected if it changes."""
+    cfg = _load(config)
+    cfg.sensor_templates_file = ''
+    results = _model(cfg, codebase)
+    effects = FunctionEffectAnalyzer(results.parse_results, results.graph).analyze(method)
+    if not effects:
+        raise _fail(not_found_message('Function', method, function_names(results)))
+    typer.echo('\n\n'.join(format_effect(e) for e in effects))
+    typer.echo(f"\nReport: {ReportGenerator(cfg).generate_function_effect(effects, output_format, query=method)}")  # type: ignore[arg-type]
+
+
+def _sensor_table(findings: List[SensorFinding]) -> str:
+    rows = [('Sensor', 'Class', 'Corrupt', 'Stale', 'Debounce')]
+    for f in findings:
+        rows.append((f.template.name, f.class_name or '(not found)',
+                     *(f.checks[c].status if f.checks else '-' for c in ('corrupt', 'stale', 'debounce'))))
+    widths = [max(len(r[i]) for r in rows) for i in range(5)]
+    return '\n'.join('  '.join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip() for r in rows)
+
+
+@app.command()
+def sensors(
+    codebase: str = typer.Argument(..., help='Path to C++ codebase directory'),
+    templates: Optional[str] = _TEMPLATES,
+    config: str = _CONFIG,
+) -> None:
+    """Check each templated sensor for corrupt / stale / debounce handling in the code."""
+    cfg = _load(config, templates)
+    if not cfg.sensor_templates_file:
+        raise _fail("No sensor templates: pass --templates or set sensor_templates_file in the config")
+    result = _model(cfg, codebase).sensors
+    typer.echo(_sensor_table(result.findings))
+    for f in result.findings:
+        for name, c in f.checks.items():
+            if c.status in ('missing', 'mismatch'):
+                found = f"; found {', '.join(f'{v:g}' for v in c.found)}" if c.found else ''
+                typer.echo(f"  {f.template.name}.{name}: {c.status} (expected {c.expected}{found})")
+    if result.unmapped_sensor_classes:
+        typer.echo(f"Sensor classes without a template: {', '.join(result.unmapped_sensor_classes)}")
+
+
+@app.command('sensor-check')
+def sensor_check(
+    samples_csv: str = typer.Argument(..., help='CSV with columns sensor,timestamp_ms,value'),
+    templates: Optional[str] = _TEMPLATES,
+    config: str = _CONFIG,
+) -> None:
+    """Replay recorded sensor samples through the templates' corrupt / stale / debounce rules."""
+    cfg = _load(config, templates)
+    if not cfg.sensor_templates_file:
+        raise _fail("No sensor templates: pass --templates or set sensor_templates_file in the config")
+    try:
+        by_name = {t.name: t for t in load_sensor_templates(cfg.sensor_templates_file)}
+        samples = load_samples_csv(samples_csv)
+    except (ValueError, OSError) as exc:
+        raise _fail(f"Error: {exc}")
+    unknown = []
+    for name, rows in samples.items():
+        if name not in by_name:
+            unknown.append(name)
+            continue
+        results = check_samples(by_name[name], rows)
+        typer.echo(name)
+        for r in results:
+            accepted = '' if r.accepted_value is None else f"  accepted={r.accepted_value:.10g}"
+            typer.echo(f"  t={r.timestamp_ms:.10g} ms  value={r.value:.10g}{accepted}  {', '.join(r.flags) or 'ok'}")
+        counts = summarize(results)
+        typer.echo(f"  Summary: {counts['total']} samples, corrupt {counts['corrupt']}, "
+                   f"stale {counts['stale']}, debounce {counts['debounce']}\n")
+    if unknown:
+        raise _fail(f"No template for sensor(s) in the CSV: {', '.join(unknown)}")
+
+
+@app.command()
+def ask(
+    codebase: str = typer.Argument(..., help='Path to C++ codebase directory'),
+    question: str = typer.Argument(..., help='e.g. "What are the virtual functions implemented by TemperatureSensor?"'),
+    sensor_templates: Optional[str] = _TEMPLATES,
+    config: str = _CONFIG,
+) -> None:
+    """Answer a question from the static analysis; the local LLM (if enabled) only explains the facts."""
+    cfg = _load(config, sensor_templates)
+    results = _model(cfg, codebase)
+    llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
+    narrator = RAGNarrativeGenerator(llm, None) if cfg.ollama_enabled and llm.is_available() else None
+    typer.echo(answer_question(question, results, narrator))
+
+
+@app.command()
 def validate_config(config: str = typer.Option('config.yaml')) -> None:
     """Validate configuration file."""
-    cfg = load_config(config)
+    try:
+        cfg = load_config(config)
+    except ValueError as exc:
+        raise _fail(f"Error: {exc}")
     typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
 
 if __name__ == '__main__':
+    # Piped output on Windows defaults to cp1252, which cannot print the inheritance-tree characters.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding='utf-8', errors='replace')  # type: ignore[union-attr]
     app()

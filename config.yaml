@@ -8,6 +8,14 @@ ollama_enabled: true
 max_workers: 4
 entry_points:
   - main
+entry_point_patterns:
+  - '*_IRQHandler'
+  - '*_ISR'
+  - 'ISR_*'
+  - '*Task'
+# Path to a YAML file of reviewed findings (relative paths are resolved from this file); empty = none. The file holds
+#   findings: {DC-FUNC-1A2B3C4D: {status: confirmed_dead | false_positive | deactivated | open, justification: ..., reviewer: ...}}
+dead_code_dispositions: ''
 lru_names:
   - Motor
   - Battery
@@ -21,3 +29,4 @@ function_length_max: 50
 nesting_depth_max: 5
 param_count_max: 7
 faiss_similarity_threshold: 0.6
+sensor_templates_file: ''

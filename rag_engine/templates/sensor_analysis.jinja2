@@ -1,0 +1,79 @@
+# Sensor Data Analysis Report — R3
+Generated: {{ report_date }}
+DAL Level: {{ dal_level }}
+
+{% macro entries(title, items) %}
+- {{ title }}:
+{% for e in items %}
+  - {{ e }}
+{% else %}
+  - none
+{% endfor %}
+{% endmacro %}
+## Summary
+
+| Sensor | Class | Corrupt | Stale | Debounce |
+|--------|-------|---------|-------|----------|
+{% for f in findings %}
+{% if f.checks %}
+| {{ f.template.name }} | {{ f.class_name }} | {{ f.checks.corrupt.status }} | {{ f.checks.stale.status }} | {{ f.checks.debounce.status }} |
+{% else %}
+| {{ f.template.name }} | not found | - | - | - |
+{% endif %}
+{% endfor %}
+
+{% for f in findings %}
+## Sensor: {{ f.template.name }}
+{% if f.template.type or f.template.unit %}
+- Type: {{ f.template.type or '-' }}, unit: {{ f.template.unit or '-' }}
+{% endif %}
+{% if f.status == 'not_found' %}
+- Class: not found in the parsed code (looked for `{{ f.template.class_name or f.template.name }}`)
+{% if f.hierarchy %}
+- Hierarchy: {{ f.hierarchy | join(' → ') }}
+{% endif %}
+{% else %}
+- Class: `{{ f.class_name }}` — {{ f.file_path }}:{{ f.line_number }}
+- Instantiated: {{ 'yes' if f.instantiated else 'no' }}
+- Hierarchy: {{ f.hierarchy | join(' → ') }}
+- Data members: {{ f.data_members | join(', ') or 'none' }}
+
+### Data Flow
+
+{{ entries('Sources (where the data is obtained)', f.sources) }}
+{{ entries('Processors (call the sources)', f.processors) }}
+{{ entries('Validators', f.validators) }}
+{{ entries('Consumers', f.consumers) }}
+### Checks
+
+| Check | Status | Expected | Found | Evidence |
+|-------|--------|----------|-------|----------|
+{% for name, c in f.checks.items() %}
+| {{ name }} | {{ c.status }} | {{ c.expected | replace('|', '\\|') }} | {% for v in c.found %}{{ '%.10g' % v }}{{ ', ' if not loop.last }}{% else %}-{% endfor %} | {{ (c.evidence | map('replace', '|', '\\|') | join('; ')) or '-' }} |
+{% endfor %}
+{% set unset = [] %}
+{% for name, c in f.checks.items() if c.status == 'not_configured' %}
+{% set _ = unset.append(name) %}
+{% endfor %}
+{% if unset %}
+
+- Not configured in the template: {{ unset | join(', ') }} (no value to check the code against)
+{% endif %}
+{% endif %}
+
+{% endfor %}
+## Unmapped Sensor Classes
+
+Classes derived from a mapped sensor's base class, or named `*Sensor`, that no template maps to:
+
+{% for c in unmapped %}
+- {{ c }}
+{% else %}
+None.
+{% endfor %}
+
+{% if llm_narrative %}
+## AI Certification Assessment
+
+{{ llm_narrative }}
+{% endif %}

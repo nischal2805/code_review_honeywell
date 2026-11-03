@@ -16,15 +16,15 @@ def test_parse_file_returns_parse_result():
 def test_parse_file_extracts_functions():
     result = CodeParser().parse_file(str(BASE / 'vehicle.cpp'))
     names = {f.name for f in result.functions}
-    assert {'start', 'getSpeed', 'stop', 'utilityFunc', 'orphanFunc'}.issubset(names)
+    assert {'Vehicle::start', 'Vehicle::getSpeed', 'Vehicle::stop', 'utilityFunc', 'orphanFunc'}.issubset(names)
 
 
 def test_parse_file_detects_virtual():
     result = CodeParser().parse_file(str(BASE / 'vehicle.cpp'))
     func_map = {f.name: f for f in result.functions}
-    assert func_map['start'].is_virtual is True
-    assert func_map['getSpeed'].is_virtual is True
-    assert func_map['stop'].is_virtual is False
+    assert func_map['Vehicle::start'].is_virtual is True
+    assert func_map['Vehicle::getSpeed'].is_virtual is True
+    assert func_map['Vehicle::stop'].is_virtual is False
     assert func_map['utilityFunc'].is_virtual is False
 
 
@@ -54,10 +54,10 @@ def test_parse_directory_returns_dict():
 def test_parse_current_build_has_brake():
     result = CodeParser().parse_file(str(CURRENT / 'vehicle.cpp'))
     names = {f.name for f in result.functions}
-    assert 'brake' in names
+    assert 'Vehicle::brake' in names
 
 
 def test_cyclomatic_complexity_brake():
     result = CodeParser().parse_file(str(CURRENT / 'vehicle.cpp'))
     func_map = {f.name: f for f in result.functions}
-    assert func_map['brake'].cyclomatic_complexity >= 2
+    assert func_map['Vehicle::brake'].cyclomatic_complexity >= 2

@@ -3,6 +3,7 @@ import yaml
 from docx import Document
 from reportlab.pdfgen import canvas
 from rag_engine.core.parser import CodeParser
+from rag_engine.core.graph_builder import CallGraphBuilder
 from rag_engine.config import Config
 from rag_engine.features.standards_validator import StandardsValidator
 from rag_engine.knowledge_base.standards_profile import load_raw_standards_profile
@@ -46,12 +47,51 @@ def test_dynamic_memory_flagged(tmp_path):
 
 
 def test_high_complexity_flagged(tmp_path):
-    conditions = '\n'.join(f'    if (x == {i}) {{ x++; }}' for i in range(12))
+    # CC = 26 exceeds every DAL profile's limit (A 10, B 15, C 20), so the default Config() DAL does not matter.
+    conditions = '\n'.join(f'    if (x == {i}) {{ x++; }}' for i in range(25))
     cpp = tmp_path / 'complex.cpp'
     cpp.write_text(f'void complexFunc(int x) {{\n{conditions}\n}}\n')
     v = StandardsValidator(Config(), CodeParser().parse_directory(str(tmp_path)))
     rules = {x.rule for x in v.analyze().violations}
     assert 'DO178-CC' in rules
+
+
+def _with_call_graph(path):
+    results = CodeParser().parse_directory(str(path))
+    CallGraphBuilder(results).build()  # fills fn.calls, as the pipeline does before validation
+    return results
+
+
+def test_recursion_flagged(tmp_path):
+    cpp = tmp_path / 'rec.cpp'
+    cpp.write_text('int fact(int n) { return n <= 1 ? 1 : n * fact(n - 1); }\n')
+    v = StandardsValidator(Config(), _with_call_graph(tmp_path))
+    flagged = {x.element for x in v.analyze().violations if x.rule == 'DO178-RECURSION'}
+    assert flagged == {'fact'}
+
+
+def test_non_recursive_call_not_flagged_as_recursion(tmp_path):
+    cpp = tmp_path / 'norec.cpp'
+    cpp.write_text('int Twice(int n) { return n * 2; }\nint Quad(int n) { return Twice(Twice(n)); }\n')
+    v = StandardsValidator(Config(), _with_call_graph(tmp_path))
+    assert 'DO178-RECURSION' not in {x.rule for x in v.analyze().violations}
+
+
+def test_naming_checks_short_name_and_skips_special_members(tmp_path):
+    cpp = tmp_path / 'naming.cpp'
+    cpp.write_text(
+        'class Ctl {\n'
+        'public:\n'
+        '    Ctl() {}\n'
+        '    ~Ctl() {}\n'
+        '    bool operator==(const Ctl& o) const { return true; }\n'
+        '    void Run() {}\n'
+        '    void run() {}\n'
+        '};\n'
+    )
+    v = StandardsValidator(Config(), CodeParser().parse_directory(str(tmp_path)))
+    flagged = {x.element for x in v.analyze().violations if x.rule == 'DO178-NAMING'}
+    assert flagged == {'Ctl::run'}
 
 
 def test_custom_dal_profile_overrides_defaults(tmp_path):

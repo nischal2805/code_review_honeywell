@@ -31,6 +31,74 @@ DAL Level: {{ dal_level }}
 {% endif %}
 
 {% endfor %}
+## Virtual Function Inventory
+{% if inventory %}
+Entry points: {{ entry_points | join(', ') }}
+
+{% for v in inventory %}
+### Virtual Function: {{ v.function }}
+- Declared in: {{ v.file_path }}:{{ v.line_number }} ({% if v.is_pure %}pure virtual{% elif v.has_definition %}implemented{% else %}declaration only{% endif %})
+{% if v.requirement_trace %}
+- Requirement Trace: {{ v.requirement_trace }}
+{% endif %}
+- Base implementation reachable from entry points: {{ 'yes' if v.reachable else 'no' }}
+{% if v.overridden_by %}
+- Overridden by:
+{% for o in v.overridden_by %}
+  - {{ o.function }} — {{ o.file_path }}:{{ o.line_number }} — instantiated: {{ 'yes' if o.class_instantiated else 'no' }} — reachable: {{ 'yes' if o.reachable else 'no' }}
+{% for cs in o.call_sites %}
+    - called from {{ cs.caller }} — {{ cs.file_path }}{{ ':%d' % cs.line if cs.line else '' }}
+{% endfor %}
+{% endfor %}
+{% else %}
+- Overridden by: none
+{% endif %}
+{% if v.call_sites %}
+- Usage: called from
+{% for cs in v.call_sites %}
+  - {{ cs.caller }} — {{ cs.file_path }}{{ ':%d' % cs.line if cs.line else '' }}
+{% endfor %}
+{% else %}
+- Usage: no call sites found
+{% endif %}
+- Inheritance:
+
+```text
+{{ v.inheritance_tree }}
+```
+
+{% endfor %}
+{% set unreachable = [] %}
+{% for v in inventory %}
+{% for o in v.overridden_by if not o.reachable %}
+{% set _ = unreachable.append((v, o)) %}
+{% endfor %}
+{% endfor %}
+## Overrides not reachable from entry points
+{% if unreachable %}
+
+| Override | Declared in | Overrides | Reason |
+|----------|-------------|-----------|--------|
+{% for v, o in unreachable %}
+| {{ o.function }} | {{ o.file_path }}:{{ o.line_number }} | {{ v.function }} | {{ 'no call path from the entry points' if o.class_instantiated else 'class never instantiated' }} |
+{% endfor %}
+{% else %}
+None.
+{% endif %}
+{% else %}
+No virtual functions were found in the parsed classes.
+{% endif %}
+
+{% if hierarchy_trees %}
+## Class Hierarchies
+
+{% for root, tree in hierarchy_trees.items() %}
+```text
+{{ tree }}
+```
+
+{% endfor %}
+{% endif %}
 {% if llm_narrative %}
 ## AI Certification Assessment
 

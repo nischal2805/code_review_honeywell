@@ -17,17 +17,18 @@ class CodeReader:
         results: Dict[str, ParseResult] = {}
         base = Path(dir_path)
         files = list(base.glob('**/*.cpp')) + list(base.glob('**/*.h')) + list(base.glob('**/*.hpp'))
-        for f in files:
-            cached = self._cache.check_cache(str(f))
-            if cached:
-                results[str(f)] = cached
-            else:
-                try:
-                    pr = self._parser.parse_file(str(f))
-                    self._cache.cache_result(str(f), pr)
-                    results[str(f)] = pr
-                except Exception as exc:
-                    logger.warning(f"Skip {f}: {exc}")
+        with self._cache.batch():
+            for f in files:
+                cached = self._cache.check_cache(str(f))
+                if cached:
+                    results[str(f)] = cached
+                else:
+                    try:
+                        pr = self._parser.parse_file(str(f))
+                        self._cache.cache_result(str(f), pr)
+                        results[str(f)] = pr
+                    except Exception as exc:
+                        logger.warning(f"Skip {f}: {exc}")
         return results
 
     def all_functions(self, results: Dict[str, ParseResult]) -> List[FunctionDef]:
