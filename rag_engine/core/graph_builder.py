@@ -2,6 +2,7 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 import networkx as nx
 from loguru import logger
@@ -272,6 +273,11 @@ def _call_args(body: str, open_idx: int) -> Optional[List[str]]:
     return None
 
 
+@lru_cache(maxsize=8192)
+def _call_pattern(call_token: str) -> re.Pattern:
+    return re.compile(r'(?<![\w.:])(?<!->)' + re.escape(call_token) + r'\s*\(')
+
+
 def _iter_call_sites(body: str, call_token: str) -> Iterator[Tuple[int, List[str]]]:
     """Yield ``(offset, argument expressions)`` for every call of *call_token* in *body*.
 
@@ -279,7 +285,7 @@ def _iter_call_sites(body: str, call_token: str) -> Iterator[Tuple[int, List[str
     not be the tail of a longer expression (``obj.f(``, ``p->f(``, ``ns::f(``, ``xf(``), so ``f``
     matches plain calls only.
     """
-    for m in re.finditer(r'(?<![\w.:])(?<!->)' + re.escape(call_token) + r'\s*\(', body):
+    for m in _call_pattern(call_token).finditer(body):
         args = _call_args(body, m.end() - 1)
         if args is not None:
             yield m.start(), args
@@ -331,10 +337,14 @@ _CALL_RANK = {'direct': 0, 'virtual': 1, 'constructor': 2, 'callback': 3, 'unres
 class _Calls:
     """Edges and call sites resolved for one caller."""
 
-    def __init__(self, fn: FunctionDef, body: str, nodes: Dict[str, FunctionDef]) -> None:
+    def __init__(self, fn: FunctionDef, body: str, nodes: Dict[str, FunctionDef],
+                 segments: Optional[List[Tuple[int, int]]] = None) -> None:
         self.fn = fn
-        self.caller = fn.sig_key   # a property that re-normalises types on every access
+        self.caller = fn.sig_key
         self.body = body      # comment-stripped; offsets are relative to it
+        # (offset in body, absolute line there) of each text joined into body: the function's own
+        # body, then initialiser lists and alternative definitions; a line of 0 is unknown.
+        self._segments = segments or [(0, fn.body_start_line)]
         self._nodes = nodes
         self.edges: Dict[str, Tuple[str, Set[int]]] = {}
         self.sites: List[CallSite] = []
@@ -342,9 +352,10 @@ class _Calls:
 
     def line_of(self, offset: Optional[int]) -> int:
         """Absolute line of a body offset, 0 when it cannot be determined."""
-        if offset is None or not self.fn.body_start_line:
+        if offset is None:
             return 0
-        return self.fn.body_start_line + self.body.count('\n', 0, offset)
+        start, line = max((seg for seg in self._segments if seg[0] <= offset), default=(0, 0))
+        return line + self.body.count('\n', start, offset) if line else 0
 
     def edge(self, target: str, call_type: str, offset: Optional[int]) -> None:
         """Graph edge only (a target without a function body has no node and gets none)."""
@@ -382,11 +393,15 @@ class _Calls:
 # ---------------------------------------------------------------------------
 
 _QUALIFIED_CALL = re.compile(r'\b([A-Za-z_]\w*(?:::[A-Za-z_]\w*)+)\s*\(')
+# ::f(): nothing qualifies the name, so it is a free function (``ns::f(`` and ``Foo<T>::f(`` are not)
+_GLOBAL_CALL = re.compile(r'(?<![\w>:])::\s*([A-Za-z_]\w*)\s*\(')
 # Receiver may be indexed: sensors[i]->read()
 _MEMBER_CALL = re.compile(r'\b([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*(->|\.)([A-Za-z_]\w*)\s*\(')
+# Any member call, whatever the receiver expression: a.b().c(), (*p).f(), static_cast<T*>(p)->f()
+_ANY_MEMBER_CALL = re.compile(r'(?:->|\.)\s*([A-Za-z_]\w*)\s*\(')
 _BARE_CALL = re.compile(r'(?<![\w.:])(?<!->)([A-Za-z_]\w*)\s*\(')
-# ClassName var;  /  ClassName* ptr = …;
-_LOCAL_DECL = re.compile(r'\b([A-Z][A-Za-z_]\w*)\s*([\*&]?)\s+([a-z_]\w*)\s*(?:=|;|\()')
+# ClassName var;  /  ClassName* ptr = …;  /  Base *b;  /  Base const &r = …;  /  const Base & r;
+_LOCAL_DECL = re.compile(r'\b([A-Z][A-Za-z_]\w*)(?:\s+const)?(?:\s*([*&]+)\s*|\s+)(?:const\s+)?([a-z_]\w*)\s*(?:=|;|\(|\{|\[)')
 _CTOR_LOCAL = re.compile(r'\b([A-Za-z_]\w*)\s+[A-Za-z_]\w*\s*;')
 _CTOR_NEW = re.compile(r'\bnew\s+([A-Za-z_]\w*)\s*[\(;]')
 # The argument text is a lookahead so scanning resumes inside the parentheses: if (reg(cb)) finds reg(cb).
@@ -394,8 +409,14 @@ _ARG_CALL = re.compile(r'\b([A-Za-z_]\w*)\s*\((?=([^)]*)\))')
 # Keywords that are followed by a parenthesis but are not calls.
 _NOT_CALLS = frozenset({'if', 'while', 'for', 'switch', 'return', 'sizeof', 'catch', 'alignof', 'decltype',
                         'static_assert', 'throw'})
+# Keywords that can stand where a type name does in ``T x;`` (``return x;``, ``else x = 1;``).
+_KEYWORDS = _NOT_CALLS | frozenset({'else', 'delete', 'case', 'do', 'new', 'goto', 'typedef', 'using', 'namespace',
+                                    'struct', 'class', 'union', 'enum', 'const', 'static', 'extern', 'auto', 'void',
+                                    'typename', 'template', 'public', 'private', 'protected', 'break', 'continue',
+                                    'co_return', 'co_await', 'co_yield', 'and', 'or', 'not'})
 # T x;  T x(...);  T x = ...;  T x{...};  T x[n];  -- a non-pointer object
 _LOCAL_OBJECT = re.compile(r'(?<![\w:.>])((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s+[A-Za-z_]\w*\s*[;=({\[]')
+_ARG_NAME = re.compile(r'(?<![\w.])(?<!->)(?<![\w>]::)\b([A-Za-z_]\w*)\b(?!\s*(?:\(|::))')
 _NEW_OBJECT = re.compile(r'\bnew\s+((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)')
 
 
@@ -430,20 +451,27 @@ class CallGraphBuilder:
                 self._graph.add_node(fn.sig_key, function=fn)
         self._index_functions()
 
+        # Default member initialisers run from every constructor of the class.  # shortcut: a class
+        # whose constructors are all declared but not defined in the analyzed files has none to run them
+        # from, so its initialiser calls become implicit entry points when the class is instantiated.
+        self._field_inits = {name: list(cdef.field_inits) for name, cdef in self.hierarchy.classes.items()
+                             if cdef.field_inits}
+        ctor_classes = {fn.class_name for fn in self._all_funcs.values() if self._is_constructor(fn)}
+
         # Strip comments before any regex scanning so that commented-out calls
         # are not treated as live call sites.
-        work = [(fn, _blank_dead_branches(_strip_comments(fn.body)))
-                for result in self._results.values() for fn in result.functions]
+        work = [(fn, *self._scan_text(fn)) for result in self._results.values() for fn in result.functions]
         self.instantiated_classes = self._find_instantiated(work)
 
         # Phase 2: resolve call edges for every function.
-        for fn, body in work:
-            calls = self._extract_calls(fn, body)
+        for fn, body, segments in work:
+            calls = self._extract_calls(fn, body, segments)
             fn.calls.update(calls.edges)
             for callee_key, (call_type, lines) in calls.edges.items():
                 self._graph.add_edge(calls.caller, callee_key, call_type=call_type, lines=sorted(lines))
                 self._all_funcs[callee_key].called_by.add(calls.caller)
             self.call_sites.extend(calls.sites)
+        self._initialiser_roots(ctor_classes)
 
         logger.debug(
             f"Call graph: {self._graph.number_of_nodes()} nodes, "
@@ -497,12 +525,16 @@ class CallGraphBuilder:
 
     def implicit_entry_points(self) -> Set[str]:
         """Constructors and destructors of instantiated classes and of their ancestors: the compiler
-        calls them, so no call edge ever points at them.  Call after build()."""
+        calls them, so no call edge ever points at them.  Also what the compiler calls outside any
+        function: initialisers of file-scope variables, and the default member initialisers of
+        instantiated classes that define no constructor.  Call after build()."""
         # shortcut: a class instantiated only in dead code still counts; upgrade with reachability-aware instantiation.
         classes = set(self.instantiated_classes)
         for cls in self.instantiated_classes:
             classes.update(self.hierarchy.ancestors(cls))
-        found: Set[str] = set()
+        found = {k for k in self._static_init_roots if not self._all_funcs[k].never_built}
+        for cls in classes:
+            found |= {k for k in self._default_init_roots.get(cls, ()) if not self._all_funcs[k].never_built}
         for sig_key, fn in self._all_funcs.items():
             if fn.class_name in classes and not fn.never_built:
                 own = fn.class_name.rsplit('::', 1)[-1]
@@ -581,7 +613,50 @@ class CallGraphBuilder:
         # A call that is never closed cannot be matched by its arguments: keep every candidate.
         return sorted(set(candidates) if args is None else _site_matches(candidates, args, self._sigs))
 
-    def _find_instantiated(self, work: List[Tuple[FunctionDef, str]]) -> Set[str]:
+    @staticmethod
+    def _is_constructor(fn: FunctionDef) -> bool:
+        return bool(fn.class_name) and not fn.never_built and fn.name.rsplit('::', 1)[-1] == fn.class_name.rsplit('::', 1)[-1]
+
+    def _scan_text(self, fn: FunctionDef) -> Tuple[str, List[Tuple[int, int]]]:
+        """Everything the compiler runs as part of *fn*, comment-stripped and joined, with the line at which
+        each part starts: the body, a constructor's initialiser list, the bodies of the other ``#if``/``#else``
+        alternatives, and (for a constructor) the class's default member initialisers."""
+        parts = [(fn.body_start_line, fn.body)] if fn.body else []
+        parts += fn.extra_bodies
+        if self._is_constructor(fn):
+            cdef = self.hierarchy.classes.get(fn.class_name)
+            # the recorded lines belong to the file that declares the class
+            parts += [(line if cdef and cdef.file_path == fn.file_path else 0, text)
+                      for line, text in self._field_inits.get(fn.class_name, ())]
+        return self._joined(parts)
+
+    def _initialiser_roots(self, ctor_classes: Set[str]) -> None:
+        """Resolve the calls made outside any function body: file-scope variable initialisers, and the
+        default member initialisers of classes with no constructor to run them from."""
+        self._static_init_roots, self._default_init_roots = set(), {}
+        for path, result in self._results.items():
+            for line, text, scope in result.static_inits:
+                ctx = self._context(f"{scope}::<static init>" if scope else '<static init>', path, None)
+                self._static_init_roots |= set(self._extract_calls(ctx, *self._joined([(line, text)])).edges)
+        for cls, inits in self._field_inits.items():
+            if cls not in ctor_classes:
+                ctx = self._context(f"{cls}::<default member init>", self.hierarchy.classes[cls].file_path, cls)
+                self._default_init_roots[cls] = set(self._extract_calls(ctx, *self._joined(inits)).edges)
+
+    @staticmethod
+    def _joined(parts: List[Tuple[int, str]]) -> Tuple[str, List[Tuple[int, int]]]:
+        text, segments = '', []
+        for line, part in parts:
+            segments.append((len(text), line))
+            text += _blank_dead_branches(_strip_comments(part)) + '\n'
+        return text, segments
+
+    @staticmethod
+    def _context(name: str, file_path: str, class_name: Optional[str]) -> FunctionDef:
+        """A stand-in caller for code that belongs to no function (initialisers)."""
+        return FunctionDef(name, file_path, 0, 'void', [], False, False, False, '', None, 1, 1, 0, class_name=class_name)
+
+    def _find_instantiated(self, work: List[Tuple[FunctionDef, str, List[Tuple[int, int]]]]) -> Set[str]:
         """Classes that are constructed somewhere: local objects, ``new T``, object-typed fields."""
         found: Set[str] = set()
         # shortcut: field types count as instantiated even if the owner never is; upgrade with whole-program construction analysis.
@@ -597,12 +672,14 @@ class CallGraphBuilder:
                     cls = self.hierarchy.resolve_class(bare_type(f.type_), cdef.name)
                     if cls:
                         found.add(cls)
-        for fn, body in work:
+        for fn, body, _ in work:
             if fn.never_built:
                 continue
             scope = self._scope(fn)
             for pattern in (_LOCAL_OBJECT, _NEW_OBJECT):
                 for m in pattern.finditer(body):
+                    if m.group(1) in _KEYWORDS:
+                        continue
                     cls = self.hierarchy.resolve_class(m.group(1), scope)
                     if cls:
                         found.add(cls)
@@ -610,11 +687,12 @@ class CallGraphBuilder:
 
     # ── Call extraction ─────────────────────────────────────────────────────
 
-    def _extract_calls(self, fn: FunctionDef, body: str) -> _Calls:
-        out = _Calls(fn, body, self._all_funcs)
-        if not fn.body:
+    def _extract_calls(self, fn: FunctionDef, body: str, segments: List[Tuple[int, int]]) -> _Calls:
+        out = _Calls(fn, body, self._all_funcs, segments)
+        if not body.strip():
             return out
         self._qualified_calls(fn, body, out)
+        self._global_calls(body, out)
         self._member_calls(fn, body, out)
         self._bare_calls(fn, body, out)
         self._constructor_calls(body, out)
@@ -641,12 +719,25 @@ class CallGraphBuilder:
             for sig_key in self._match_site(candidates, body, m.end() - 1):
                 out.call(sig_key, kind, m.start())
 
+    def _global_calls(self, body: str, out: _Calls) -> None:
+        """``::f(...)``: the free function ``f``, even inside a class that has a member of that name."""
+        for m in _GLOBAL_CALL.finditer(body):
+            free = {c for c in self._by_short.get(m.group(1), ()) if '::' not in c.split('(')[0]}
+            for sig_key in self._match_site(free, body, m.end() - 1):
+                out.call(sig_key, 'direct', m.start())
+
+    def _is_member(self, sig_key: str) -> bool:
+        fn = self._all_funcs.get(sig_key)
+        return fn is not None and fn.class_name is not None
+
     def _member_calls(self, fn: FunctionDef, body: str, out: _Calls) -> None:
         """``obj.method(...)`` and ``ptr->method(...)``, typed by parameters, locals and fields."""
         var_type = self._local_types(fn, body)
         scope = self._scope(fn)
+        seen: Set[int] = set()     # offsets of the method names the typed pass looked at
         for m in _MEMBER_CALL.finditer(body):
             receiver, op, method = m.groups()
+            seen.add(m.start(3))
             offset, open_idx = m.start(), m.end() - 1
             if receiver == 'this':
                 type_name, shown, dispatch = fn.class_name, None, True
@@ -671,13 +762,23 @@ class CallGraphBuilder:
             for sig_key in self._match_site(candidates, body, open_idx):
                 out.call(sig_key, 'unresolved', offset, shown)
 
+        # The receiver is not a plain variable (``a.b().c()``, ``(*p).f()``, ``static_cast<T*>(p)->f()``,
+        # ``arr[i][j].f()``): its type is unknown, so fan out over every method of that name.
+        # shortcut: the return type of the inner call is not followed; upgrade by typing call results.
+        for m in _ANY_MEMBER_CALL.finditer(body):
+            if m.start(1) in seen:
+                continue
+            members = {c for c in self._by_short.get(m.group(1), ()) if self._is_member(c)}
+            for sig_key in self._match_site(members, body, m.end() - 1):
+                out.call(sig_key, 'unresolved', m.start())
+
     @staticmethod
     def _local_types(fn: FunctionDef, body: str) -> Dict[str, Tuple[str, bool]]:
         """Variable name → (type name, is pointer or reference) for parameters and local declarations."""
         var_type: Dict[str, Tuple[str, bool]] = {}
         # Strip qualifiers; the parser may attach * / & to either the type or the name field.
         for p in fn.parameters:
-            bare_type_name = re.sub(r'[\*&]', '', p.type_).strip().split()[-1] if p.type_.strip() else ''
+            bare_type_name = bare_type(p.type_)
             bare_name = re.sub(r'[\*&\s]', '', p.name)
             if bare_name and bare_type_name:
                 var_type[bare_name] = (bare_type_name, bool(re.search(r'[*&]', p.type_ + p.name)))
@@ -754,7 +855,9 @@ class CallGraphBuilder:
         for call in _ARG_CALL.finditer(body):
             if call.group(1) in _NOT_CALLS:
                 continue
-            for arg in re.finditer(r'\b([A-Za-z_]\w*)\b(?!\s*\()', call.group(2)):   # not a nested call
+            # not a nested call, a member (``c.status``, ``p->mode``), an enumerator or a qualifier
+            # (``Mode::status``); a leading ``::`` is fine: ``&::cmd`` names the free function
+            for arg in _ARG_NAME.finditer(call.group(2)):
                 if arg.group(1) in own:
                     continue
                 for sig_key in sorted(self._by_short.get(arg.group(1), ())):

@@ -216,3 +216,11 @@ def test_method_declarations_keep_their_default_arguments(tmp_path):
     show = h.method('D::show(float, int)')
     assert [p.default_value for p in show.parameters] == [None, '2']
     assert h.method('D::log(const char *, ...)').param_types == ['const char *', '...']
+
+
+def test_short_name_fallback_needs_a_unique_class_and_is_cached(tmp_path):
+    h, _ = _hierarchy_of(tmp_path, 'namespace a { class Foo {}; }\nnamespace b { class Foo {}; class Bar {}; }\n')
+    assert h.resolve_class('Bar') == 'b::Bar'          # unique short name
+    assert h.resolve_class('Foo') is None              # ambiguous
+    assert h.resolve_class('b::Foo', 'a') == 'b::Foo'
+    assert h.resolve_class('Bar') == 'b::Bar'          # cached answer is the same

@@ -243,3 +243,42 @@ def test_variadic_parameters_are_part_of_the_key(tmp_path):
     keys = {fn.name: fn.sig_key for fn in result.functions}
     assert keys == {'L::log': 'L::log(const char *, ...)', 'v': 'v(...)', 'pack': 'pack(Args ..., int)'}
     assert result.class_defs[0].methods[0].sig_key == keys['L::log']
+
+
+def test_const_and_non_const_overloads_with_one_sig_key_are_not_merged(tmp_path):
+    src = 'class A { public: int get() const; int get(); };\nint A::get() const { return 1; }\nint A::get() { return 2; }\n'
+    fns = [fn for fn in _parse_src(tmp_path, src).functions if fn.name == 'A::get']
+    assert len(fns) == 1 and fns[0].preproc_guard is None and fns[0].extra_bodies == []
+
+
+def test_return_type_keeps_the_declarator_of_a_member_function(tmp_path):
+    src = 'struct S {};\nclass A { public: S* p(); S& r(); };\nS* A::p() { return 0; }\n'
+    types = {fn.name: fn.return_type for fn in _parse_src(tmp_path, src).functions}
+    assert types == {'A::p': 'S *'}
+
+
+def test_constructor_initialiser_arguments_are_kept_without_the_member_names(tmp_path):
+    src = 'class A { public: A(int size); int size; int n; };\nA::A(int size) : size(size), n(compute(size)) {}\n'
+    fn = _parse_src(tmp_path, src).functions[0]
+    assert [text for _, text in fn.extra_bodies] == ['(size)', '(compute(size))']
+    assert [line for line, _ in fn.extra_bodies] == [2, 2]
+
+
+def test_default_member_initialisers_and_file_scope_initialisers_are_recorded(tmp_path):
+    src = ('class A { public: int a = f(); int b{g()}; int c = 3; static int d; };\n'
+           'int A::d = h();\n'
+           'static int g_x = k(1);\n'
+           'namespace ns { static int g_y = m(); }\n'
+           'int g_plain = 5;\n')
+    result = _parse_src(tmp_path, src)
+    assert [text for _, text in result.class_defs[0].field_inits] == ['f()', '{g()}', '3']
+    assert result.static_inits == [(2, ' = h()', None), (3, ' = k(1)', None), (4, ' = m()', 'ns')]
+
+
+def test_parameter_names_are_not_part_of_array_and_function_pointer_types(tmp_path):
+    src = 'void f(unsigned char buf[], int m[4][4], void (*cb)(int value), int (&ref)[4]) {}\n'
+    fn = _parse_src(tmp_path, src).functions[0]
+    assert [(p.name, p.type_) for p in fn.parameters] == [
+        ('buf', 'unsigned char []'), ('m', 'int [4][4]'), ('cb', 'void (*)(int)'),
+        ('ref', 'int (&)[4]')]
+    assert fn.sig_key == 'f(unsigned char [], int [] [], void (*)(int), int (&) [])'

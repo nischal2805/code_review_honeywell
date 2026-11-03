@@ -328,3 +328,21 @@ def test_pointer_reference_and_this_receivers_dispatch(tmp_path):
                    'viaLocalReference(Base &)', 'P::run()', 'R::run()'):
         assert _edges(b, caller) == {'Base::f()': 'direct', 'Der::f()': 'virtual'}, caller
     assert _edges(b, 'T::run()') == {'T::g()': 'direct', 'U::g()': 'virtual'}
+
+
+def test_member_call_on_an_expression_does_not_fan_out_to_free_functions(tmp_path):
+    b = _build(tmp_path, 'class A { public: A& self(); void go(); };\nA& A::self() { return *this; }\nvoid A::go() {}\n'
+                         'void go() {}\nvoid run(A* a) { a->self().go(); }\n')
+    assert _edges(b, 'run(A *)') == {'A::self()': 'direct', 'A::go()': 'unresolved'}
+
+
+def test_return_and_else_are_not_local_object_declarations(tmp_path):
+    b = _build(tmp_path, 'class value { public: value() {} };\nint f(int x) { if (x) return x; else x = 1; return value_of(x); }\n'
+                         'int value_of(int v) { return v; }\n')
+    assert b.instantiated_classes == set()
+
+
+def test_call_edges_from_alternative_definitions_carry_their_own_lines(tmp_path):
+    b = _build(tmp_path, 'void a() {}\nvoid b() {}\n#ifdef X\nvoid f() {\n  a();\n}\n#else\nvoid f() {\n\n  b();\n}\n#endif\n')
+    assert b.graph['f()']['a()']['lines'] == [5]
+    assert b.graph['f()']['b()']['lines'] == [10]

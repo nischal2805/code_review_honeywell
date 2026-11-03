@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple
 import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser, Node
 from loguru import logger
@@ -10,7 +10,7 @@ from rag_engine.models import (
     ClassDef, FieldDef, FunctionDef, MethodDecl, Parameter, ParseResult, make_sig_key,
 )
 from rag_engine.core.ast_builder import (
-    get_text, find_nodes, find_child,
+    get_text, find_nodes, find_child, constructed_by_arguments, declared_type_names, _declared_name,
     compute_cyclomatic_complexity, compute_nesting_depth, declared_names, extract_data_access,
 )
 
@@ -28,14 +28,18 @@ class CodeParser:
         source = Path(file_path).read_bytes()
         tree = self._parser.parse(source)
         root = tree.root_node
+        functions = self._extract_functions(root, source, file_path)
+        objects, inits = self._file_scope(root, source, lambda: declared_type_names(root, source),
+                                          {fn.name.rsplit('::', 1)[-1] for fn in functions})
         return ParseResult(
             file_path=file_path,
-            functions=self._extract_functions(root, source, file_path),
+            functions=functions,
             classes=self._extract_class_names(root, source),
             includes=self._extract_includes(root, source),
             raw_source=source,
             class_defs=self._extract_class_defs(root, source, file_path),
-            file_scope_objects=self._file_scope_objects(root, source),
+            file_scope_objects=objects,
+            static_inits=inits,
         )
 
     def parse_directory(self, dir_path: str, pattern: str = "**/*.cpp") -> Dict[str, ParseResult]:
@@ -51,18 +55,52 @@ class CodeParser:
         return results
 
     def _extract_functions(self, root: Node, source: bytes, file_path: str) -> List[FunctionDef]:
-        # Deduplicate by sig_key (name + parameter types) so that overloaded
-        # functions – which share the same .name but differ in parameter types –
-        # are kept as separate FunctionDef entries.  Previously this set stored
-        # fn.name, which caused the second overload to be silently discarded.
-        seen: set = set()
-        functions: List[FunctionDef] = []
+        # Group by sig_key (name + parameter types) so overloads stay separate entries; several
+        # definitions of one sig_key are the alternatives of a conditional compilation.
+        groups: Dict[str, List[Tuple[FunctionDef, bool]]] = {}
         for node in find_nodes(root, 'function_definition'):
             fn = self._parse_function(node, source, file_path)
-            if fn and fn.sig_key not in seen:
-                seen.add(fn.sig_key)
-                functions.append(fn)
-        return functions
+            if fn:
+                groups.setdefault(fn.sig_key, []).append((fn, self._conditionally_compiled(node)))
+        return [self._pick_definition(alts) for alts in groups.values()]
+
+    @staticmethod
+    def _pick_definition(alts: List[Tuple[FunctionDef, bool]]) -> FunctionDef:
+        """The definition the build uses for one sig_key.
+
+        Without conditional compilation the first wins (a ``const`` overload shares the key).  Under
+        ``#if``: definitions excluded by a constant-false condition lose to any other; if several may
+        be compiled (``#ifdef X`` / ``#else``) the first is kept, the others' bodies and data access
+        are merged into it and its preproc_guard names the alternatives (``X | !X``).
+        """
+        first = alts[0][0]
+        if len(alts) == 1 or not any(conditional for _, conditional in alts):
+            return first
+        live = [fn for fn, _ in alts if not fn.never_built] or [first]
+        keep = live[0]
+        if len(live) > 1:
+            for other in live[1:]:
+                keep.extra_bodies.append((other.body_start_line, other.body))
+                keep.extra_bodies += other.extra_bodies
+                keep.data_reads |= other.data_reads
+                keep.data_writes |= other.data_writes
+                keep.local_names |= other.local_names
+            guards = [fn.preproc_guard for fn in live]
+            keep.preproc_guard = (f"{guards[0]} | !{guards[0]}" if len(live) == 2 and guards[0] and not guards[1]
+                                  else ' | '.join(g or 'else' for g in guards))
+        return keep
+
+    @staticmethod
+    def _conditionally_compiled(node: Node) -> bool:
+        """Inside an ``#if``/``#ifdef``/``#elif``/``#else`` branch that is not just an include guard."""
+        parent = node.parent
+        while parent is not None:
+            if parent.type in ('preproc_if', 'preproc_elif', 'preproc_else') or (
+                    parent.type == 'preproc_ifdef' and (parent.children[0].type == '#ifdef' or any(
+                        c.type in ('preproc_else', 'preproc_elif') for c in parent.children))):
+                return True
+            parent = parent.parent
+        return False
 
     def _parse_function(self, node: Node, source: bytes, file_path: str) -> Optional[FunctionDef]:
         try:
@@ -103,11 +141,12 @@ class CodeParser:
                 t = child.type
                 if t not in ('function_declarator', 'compound_statement', 'comment',
                              'virtual_specifier', 'storage_class_specifier', 'type_qualifier',
-                             'virtual'):
+                             'virtual', 'field_initializer_list'):
                     ctext = get_text(child, source).strip()
                     if ctext and ctext not in ('virtual', 'inline', 'static', 'explicit', 'constexpr'):
                         ret_type = ctext
                         break
+            ret_type = f"{ret_type} {self._return_declarators(node, source)}".strip()
 
             params_node = find_child(declarator, 'parameter_list')
             parameters = self._parse_params(params_node, source) if params_node else []
@@ -155,10 +194,34 @@ class CodeParser:
                 preproc_guard=self._preproc_guard(node, source),
                 is_extern_c=self._in_extern_c(node, source),
                 local_names=declared_names(body_node, source) if body_node else set(),
+                extra_bodies=self._initialiser_arguments(node, source),
             )
         except Exception as exc:
             logger.debug(f"parse_function error: {exc}")
             return None
+
+    @staticmethod
+    def _return_declarators(node: Node, source: bytes) -> str:
+        """The ``*``/``&`` (and ``const``) written on the declarator of ``Foo* f()``: part of the return type."""
+        text = ''
+        declarator = node.child_by_field_name('declarator')
+        while declarator is not None and declarator.type in ('pointer_declarator', 'reference_declarator'):
+            text += get_text(declarator.children[0], source).strip()
+            text += ''.join(f" {get_text(c, source).strip()} " for c in declarator.children if c.type == 'type_qualifier')
+            declarator = declarator.child_by_field_name('declarator') or next(iter(declarator.named_children), None)
+        return ' '.join(text.split())
+
+    @staticmethod
+    def _initialiser_arguments(node: Node, source: bytes) -> List[Tuple[int, str]]:
+        """``(line, text)`` of each argument list in a constructor's ``: a_(f()), Base(g())`` list; the
+        member names are left out so ``size(size)`` does not read as a call of ``size()``."""
+        init_list = find_child(node, 'field_initializer_list')
+        found: List[Tuple[int, str]] = []
+        for init in (init_list.named_children if init_list is not None else []):
+            args = init.named_children[-1] if init.type == 'field_initializer' and init.named_children else None
+            if args is not None and args.type in ('argument_list', 'initializer_list'):
+                found.append((args.start_point[0] + 1, get_text(args, source)))
+        return found
 
     @staticmethod
     def _function_declarator(node: Node) -> Optional[Node]:
@@ -210,9 +273,15 @@ class CodeParser:
             parent = parent.parent
         return False
 
-    def _file_scope_objects(self, root: Node, source: bytes) -> List[Tuple[str, Optional[str]]]:
-        """Types of the objects defined at file or namespace scope (``static Mgr g_mgr;``)."""
+    def _file_scope(self, root: Node, source: bytes, type_names: Callable[[], Set[str]], fn_names: Set[str],
+                    ) -> Tuple[List[Tuple[str, Optional[str]]], List[Tuple[int, str, Optional[str]]]]:
+        """``(objects, initialisers)`` of the file and namespace scope.
+
+        Objects are the types of the variables defined there (``static Mgr g_mgr;``); initialisers are
+        the ``(line, text, namespace)`` of each variable's initialiser (``= seedValue()``, ``{make()}``).
+        """
         found: List[Tuple[str, Optional[str]]] = []
+        inits: List[Tuple[int, str, Optional[str]]] = []
 
         def walk(node: Node, scope: Optional[str], only_alternatives: bool = False) -> None:
             for child in node.children:
@@ -227,21 +296,37 @@ class CodeParser:
                     walk(child, scope, condition is not None and get_text(condition, source).strip() in ('0', 'false'))
                 elif child.type == 'declaration':
                     type_node = child.child_by_field_name('type')
+                    declarators = child.children_by_field_name('declarator')
                     if (type_node is not None and type_node.type in ('type_identifier', 'qualified_identifier', 'template_type')
-                            and any(self._is_object_declarator(d) for d in child.children_by_field_name('declarator'))):
+                            and any(self._is_object_declarator(d, source, type_names, fn_names) for d in declarators)):
                         found.append((get_text(type_node, source).strip(), scope))
+                    for d in declarators:
+                        name = d.child_by_field_name('declarator') if d.type == 'init_declarator' else None
+                        text = source[name.end_byte:d.end_byte].decode('utf8', errors='replace') if name is not None else ''
+                        if '(' in text:
+                            inits.append((d.start_point[0] + 1, text, scope))
 
         walk(root, None)
-        return found
+        return found, inits
 
     @staticmethod
-    def _is_object_declarator(declarator: Node) -> bool:
-        """A plain object or array of objects; not a pointer, a reference or a function declaration."""
+    def _is_object_declarator(declarator: Node, source: bytes, type_names: Callable[[], Set[str]],
+                              fn_names: Set[str]) -> bool:
+        """A plain object or array of objects; not a pointer, a reference or a function declaration.
+
+        ``Uart g(UART1_BASE);`` reads as a function declaration to tree-sitter; it is an object when
+        every "parameter" is a lone name that is no type (see constructed_by_arguments) and no function
+        of that name is defined.
+        """
         node: Optional[Node] = declarator
         if node is not None and node.type == 'init_declarator':
             node = node.child_by_field_name('declarator')
         while node is not None and node.type == 'array_declarator':
             node = node.child_by_field_name('declarator')
+        if node is not None and node.type == 'function_declarator':
+            name = node.child_by_field_name('declarator')
+            return (name is not None and get_text(name, source).rsplit('::', 1)[-1] not in fn_names
+                    and constructed_by_arguments(node, source, type_names))
         return node is not None and node.type in ('identifier', 'qualified_identifier')
 
     @staticmethod
@@ -294,6 +379,11 @@ class CodeParser:
             'abstract_pointer_declarator',
             'abstract_reference_declarator',
             'variadic_declarator',
+            'array_declarator',
+            'abstract_array_declarator',
+            'function_declarator',
+            'abstract_function_declarator',
+            'parenthesized_declarator',
         }
 
         params: List[Parameter] = []
@@ -338,6 +428,15 @@ class CodeParser:
             decl_node = kids[decl_idx]
             decl_text = get_text(decl_node, source).strip()
 
+            if find_nodes(decl_node, 'array_declarator', 'abstract_array_declarator',
+                          'function_declarator', 'abstract_function_declarator'):
+                # Arrays and function pointers: the type keeps the shape (``unsigned char []``,
+                # ``void (*)(int)``) but not the names, so a declaration and its definition agree.
+                name = _declared_name(decl_node, source) or ''
+                params.append(Parameter(name=name, type_=f"{base_type} {self._declarator_shape(decl_node, source)}".strip(),
+                                        default_value=default_value))
+                continue
+
             if decl_node.type in ('pointer_declarator', 'reference_declarator',
                                    'abstract_pointer_declarator',
                                    'abstract_reference_declarator',
@@ -361,6 +460,30 @@ class CodeParser:
             params.append(Parameter(name=var_name, type_=full_type, default_value=default_value))
         return params
 
+    def _declarator_shape(self, node: Node, source: bytes) -> str:
+        """A declarator written without the name it declares and without parameter names:
+        ``(*cb)(int value)`` -> ``(*)(int)``, ``buf[16]`` -> ``[16]``."""
+        kind = node.type
+        inner = node.child_by_field_name('declarator')
+        inner_text = self._declarator_shape(inner, source) if inner is not None else ''
+        if kind in ('function_declarator', 'abstract_function_declarator'):
+            plist = node.child_by_field_name('parameters')
+            types = ', '.join(p.type_ for p in self._parse_params(plist, source)) if plist is not None else ''
+            return f"{inner_text}({types})"
+        if kind in ('array_declarator', 'abstract_array_declarator'):
+            size = node.child_by_field_name('size')
+            return f"{inner_text}[{get_text(size, source).strip() if size is not None else ''}]"
+        if kind in ('parenthesized_declarator', 'abstract_parenthesized_declarator'):
+            return '(' + ''.join(self._declarator_shape(c, source) for c in node.named_children if c.type != 'comment') + ')'
+        if kind in ('pointer_declarator', 'abstract_pointer_declarator', 'reference_declarator',
+                    'abstract_reference_declarator'):
+            quals = ''.join(' ' + get_text(c, source).strip() for c in node.children if c.type == 'type_qualifier')
+            if inner is None:   # an abstract declarator keeps its nested declarator among the named children
+                inner_text = ''.join(self._declarator_shape(c, source) for c in node.named_children
+                                     if c.type not in ('type_qualifier', 'comment'))
+            return f"{get_text(node.children[0], source).strip()}{quals} {inner_text}".rstrip()
+        return ''
+
     def _extract_class_names(self, root: Node, source: bytes) -> List[str]:
         names: List[str] = []
         for node in find_nodes(root, 'class_specifier', 'struct_specifier'):
@@ -376,7 +499,7 @@ class CodeParser:
                 cdef = self._class_def(node, source, file_path)
             except Exception as exc:
                 # A malformed class must not cost the whole file its functions.
-                logger.debug(f"class_def error: {exc}")
+                logger.warning(f"{file_path}:{node.start_point[0] + 1}: class not analysed ({exc})")
                 continue
             if cdef:
                 class_defs.append(cdef)
@@ -408,6 +531,9 @@ class CodeParser:
                     cdef.methods.append(method)
             elif member.type == 'field_declaration':
                 cdef.fields.extend(self._field_defs(member, source))
+                for i, child in enumerate(member.children):
+                    if member.field_name_for_child(i) == 'default_value':
+                        cdef.field_inits.append((child.start_point[0] + 1, get_text(child, source)))
         return cdef
 
     def _class_members(self, node: Node) -> Iterator[Node]:

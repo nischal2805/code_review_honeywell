@@ -1,7 +1,8 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple, Literal
+from functools import lru_cache
+from typing import Dict, List, Optional, Set, Tuple, Literal
 
 
 @dataclass
@@ -42,6 +43,15 @@ class FunctionDef:
     preproc_guard: Optional[str] = None
     is_extern_c: bool = False   # defined inside an ``extern "C"`` linkage specification
     local_names: Set[str] = field(default_factory=set)   # variables declared in the body (parameters not included)
+    # Further text the compiler runs as part of this function, scanned for calls like the body:
+    # (first line, comment-bearing text) of a constructor's initialiser list and of the other
+    # ``#if``/``#else`` alternatives of a definition that is compiled either way.
+    extra_bodies: List[Tuple[int, str]] = field(default_factory=list)
+
+    def __getstate__(self) -> Dict:
+        state = self.__dict__.copy()
+        state.pop('_sig_cache', None)   # rebuilt on first use
+        return state
 
     @property
     def never_built(self) -> bool:
@@ -84,7 +94,13 @@ class FunctionDef:
         dict that maps function identity to a ``FunctionDef``.  Using it instead
         of the bare ``name`` ensures that overloaded functions are distinct nodes.
         """
-        return make_sig_key(self.name, self.parameters)
+        # Computed on first use: it is read in the hottest loops.  The cache is checked against
+        # the name and parameter types, so it stays right if either is changed afterwards.
+        stamp = (self.name, *[p.type_ for p in self.parameters])
+        cached = self.__dict__.get('_sig_cache')
+        if cached is None or cached[0] != stamp:
+            cached = self.__dict__['_sig_cache'] = (stamp, make_sig_key(self.name, self.parameters))
+        return cached[1]
 
 
 def make_sig_key(name: str, parameters: List[Parameter]) -> str:
@@ -92,21 +108,31 @@ def make_sig_key(name: str, parameters: List[Parameter]) -> str:
     return f"{name}({', '.join(_normalise_type(p.type_) for p in parameters)})"
 
 
+@lru_cache(maxsize=None)
 def _normalise_type(raw: str) -> str:
     """Return a canonical, whitespace-collapsed representation of a C++ type.
 
-    Removes leading/trailing whitespace and collapses internal runs of spaces
-    so that ``"const  std::string &"`` and ``"const std::string&"`` both
-    normalise to ``"const std::string &"``.  A single space is inserted before
-    ``*`` and ``&`` when they immediately follow a non-space character so the
-    representation is predictable regardless of how the parser emitted the type.
+    ``"const  std::string&"`` and ``"std::string const &"`` both normalise to
+    ``"const std::string &"``: a single space goes before ``*`` and ``&``, ``T const`` becomes
+    ``const T`` (also for ``T const *``), and every array bound is dropped (``int [8]`` ->
+    ``int []``), so a declaration and its definition agree however they are spelled.
     """
-    t = raw.strip()
-    # Ensure pointer/ref qualifiers are separated by exactly one space.
-    t = re.sub(r'\s*([*&])', r' \1', t)
-    # Collapse any runs of multiple spaces.
-    t = re.sub(r'  +', ' ', t)
-    return t
+    # shortcut: all array bounds read as one, so overloads differing only in an inner bound of a
+    # multi-dimensional array parameter collide; upgrade by keeping the inner bounds.
+    t = re.sub(r'\s*([*&])', r' \1', raw.strip())
+    t = re.sub(r'\s*\[[^\]]*\]', ' []', t)
+    t = re.sub(r'\(\s+', '(', re.sub(r'\s+\)', ')', t))
+    t = re.sub(r'  +', ' ', t).strip()
+    depth, cut = 0, len(t)
+    for i, ch in enumerate(t):     # the base type ends at the first top-level * & [ (
+        depth += (ch == '<') - (ch == '>')
+        if depth == 0 and ch in '*&[(':
+            cut = i
+            break
+    head, tail = t[:cut].rstrip(), t[cut:]
+    if head.endswith(' const') and not head.startswith('const '):
+        head = 'const ' + head[:-len(' const')].rstrip()
+    return f"{head} {tail}".strip() if tail else head
 
 
 @dataclass
@@ -141,6 +167,9 @@ class ClassDef:
     methods: List[MethodDecl] = field(default_factory=list)
     fields: List[FieldDef] = field(default_factory=list)
     is_struct: bool = False
+    # (line, initialiser text) of each default member initialiser (``int y = initialY();``): the
+    # compiler runs them from every constructor of the class.
+    field_inits: List[Tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -154,6 +183,9 @@ class ParseResult:
     # (type as written, enclosing namespace or None) of each object defined at file or namespace scope;
     # pointers, references and function declarations are left out.
     file_scope_objects: List[Tuple[str, Optional[str]]] = field(default_factory=list)
+    # (line, initialiser text, enclosing namespace or None) of each file-scope variable with an
+    # initialiser (``static int s = seedValue();``): evaluated before main() starts.
+    static_inits: List[Tuple[int, str, Optional[str]]] = field(default_factory=list)
 
 
 @dataclass

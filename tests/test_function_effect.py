@@ -269,3 +269,13 @@ def test_report_docx_and_odd_names(tmp_path, analyzer):
     path = generator.generate_function_effect([], 'markdown', query='operator<')
     assert Path(path).name == 'function_effect_operator_.md'
     assert 'No function matches' in Path(path).read_text(encoding='utf-8')
+
+
+def test_never_built_function_is_analysed_on_request_but_is_nobody_s_caller(tmp_path):
+    (tmp_path / 'm.cpp').write_text('int g = 0;\nvoid helper() { g = 1; }\n#if 0\nvoid gone() { helper(); g++; }\n#endif\n'
+                                    'void live() { helper(); }\nint main() { live(); return g; }\n')
+    analyzer = _analyzer_for(tmp_path)
+    assert analyzer.analyze('gone')[0].calls[0].callee == 'helper()'
+    helper = analyzer.analyze('helper')[0]
+    assert helper.callers == ['live()'] and 'gone()' not in helper.data_coupled_functions
+    assert analyzer.analyze('gone')[0].affected_components == ['m']

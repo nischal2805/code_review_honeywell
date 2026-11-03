@@ -1,15 +1,17 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import pickle
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from rag_engine.models import ParseResult
 
 # Bump whenever the pickled ParseResult/FunctionDef shape changes: it is part of the stored
 # hash, so entries written by an older shape miss instead of loading without new attributes.
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 
 class AnalysisCache:
@@ -18,6 +20,8 @@ class AnalysisCache:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._meta_path = self._dir / 'hashes.json'
         self._hashes: dict = self._load_hashes()
+        self._batching = 0
+        self._dirty = False
 
     def check_cache(self, file_path: str) -> Optional[ParseResult]:
         current_hash = self._hash_file(file_path)
@@ -35,7 +39,30 @@ class AnalysisCache:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_file, 'wb') as f:
             pickle.dump(result, f)
-        self._save_hashes()
+        self._dirty = True
+        if not self._batching:
+            self.flush()
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Write hashes.json once, when the block ends, instead of after every cache_result().
+
+        A crash inside the block loses the hashes of the files cached in it (they are parsed again
+        next run; the pickles are never read without a matching hash).
+        """
+        self._batching += 1
+        try:
+            yield
+        finally:
+            self._batching -= 1
+            if not self._batching:
+                self.flush()
+
+    def flush(self) -> None:
+        """Write hashes.json if anything changed since the last write."""
+        if self._dirty:
+            self._save_hashes()
+            self._dirty = False
 
     @staticmethod
     def _hash_file(file_path: str) -> str:
@@ -51,4 +78,6 @@ class AnalysisCache:
         return {}
 
     def _save_hashes(self) -> None:
-        self._meta_path.write_text(json.dumps(self._hashes, indent=2))
+        tmp = self._meta_path.with_suffix('.json.tmp')   # replaced atomically: a crash never leaves a torn file
+        tmp.write_text(json.dumps(self._hashes, indent=2))
+        os.replace(tmp, self._meta_path)

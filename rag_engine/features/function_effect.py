@@ -3,11 +3,11 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple
+from typing import Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple
 
 from tree_sitter import Node, Parser
 
-from rag_engine.core.ast_builder import _declared_name
+from rag_engine.core.ast_builder import _declared_name, constructed_by_arguments, declared_type_names, get_text
 from rag_engine.core.graph_builder import CallGraphBuilder
 from rag_engine.core.parser import _CPP_LANGUAGE
 from rag_engine.models import CallSite, FunctionDef, Parameter, ParseResult
@@ -81,15 +81,21 @@ def _declarations(node: Node) -> Iterator[Node]:
             yield from _declarations(child)
 
 
-def _is_prototype(declarator: Node) -> bool:
-    """``int f(int);`` (also ``int *f(int);``) but not the function-pointer variable ``void (*fp)(int);``."""
+def _is_prototype(declarator: Node, source: bytes, type_names: Callable[[], Set[str]], fn_names: Set[str]) -> bool:
+    """``int f(int);`` (also ``int *f(int);``) but not the function-pointer variable ``void (*fp)(int);``
+    nor ``Uart g_uart(UART1_BASE);``, which tree-sitter reads as a prototype but is an object."""
+    top = declarator
     while declarator.type in ('pointer_declarator', 'reference_declarator'):
         inner = declarator.child_by_field_name('declarator')
         if inner is None:
             return False
         declarator = inner
     name = declarator.child_by_field_name('declarator')
-    return declarator.type == 'function_declarator' and name is not None and name.type != 'parenthesized_declarator'
+    if declarator.type != 'function_declarator' or name is None or name.type == 'parenthesized_declarator':
+        return False
+    return not (declarator is top and name.type in ('identifier', 'qualified_identifier')
+                and get_text(name, source).rsplit('::', 1)[-1] not in fn_names
+                and constructed_by_arguments(declarator, source, type_names))
 
 
 def file_scope_variables(parse_results: Dict[str, ParseResult]) -> Dict[str, GlobalVariable]:
@@ -101,10 +107,15 @@ def file_scope_variables(parse_results: Dict[str, ParseResult]) -> Dict[str, Glo
     # files are conflated; upgrade to qualified names if such collisions matter.
     found: Dict[str, GlobalVariable] = {}
     parser = Parser(_CPP_LANGUAGE)
+    fn_names = {fn.name.rsplit('::', 1)[-1] for r in parse_results.values() for fn in r.functions}
+    known_types = {c.rsplit('::', 1)[-1] for r in parse_results.values() for c in r.classes}
     for path in sorted(parse_results):
         source = parse_results[path].raw_source
-        for decl in _declarations(parser.parse(source).root_node):
-            declarators = [d for d in decl.children_by_field_name('declarator') if not _is_prototype(d)]
+        root = parser.parse(source).root_node
+        type_names = lambda: known_types | declared_type_names(root, source)   # noqa: E731 - only a rare shape needs it
+        for decl in _declarations(root):
+            declarators = [d for d in decl.children_by_field_name('declarator')
+                           if not _is_prototype(d, source, type_names, fn_names)]
             if not declarators:
                 continue
             head = _STORAGE.sub('', source[decl.start_byte:declarators[0].start_byte].decode('utf-8', 'replace'))
@@ -161,6 +172,11 @@ class FunctionEffectAnalyzer:
         for site in graph_builder.call_sites:
             self._sites.setdefault(site.caller, []).append(site)
         self._access_cache: Dict[str, Tuple[List[VariableAccess], List[VariableAccess]]] = {}
+        # Code under ``#if 0`` is never compiled: it can be analysed on request but is nobody's caller,
+        # data partner or affected component.
+        self._live = {k: fn for k, fn in self._funcs.items() if not fn.never_built}
+        self._components = {k: _component(fn) for k, fn in self._funcs.items()}
+        self._variable_users: Optional[Tuple[Dict[_VarKey, Set[str]], Dict[_VarKey, Set[str]]]] = None
 
     def analyze(self, method: str) -> List[FunctionEffect]:
         """Effects of every function matching *method*: short name, qualified name or sig_key."""
@@ -174,10 +190,10 @@ class FunctionEffectAnalyzer:
     def _effect(self, fn: FunctionDef) -> FunctionEffect:
         reads, writes = self._accesses(fn)
         calls = self._calls(fn)
-        callers = sorted(fn.called_by)
+        callers = sorted(k for k in fn.called_by if k in self._live)
         transitive = sorted(self._transitive_callers(fn))
         data_funcs, data_components = self._data_coupling(fn, reads, writes)
-        affected = {_component(self._funcs[k]) for k in transitive + data_funcs if k in self._funcs}
+        affected = {self._components[k] for k in transitive + data_funcs if k in self._live}
         affected.add(_component(fn))
         return FunctionEffect(
             function=fn.sig_key, class_name=fn.class_name, file_path=fn.file_path,
@@ -194,7 +210,7 @@ class FunctionEffectAnalyzer:
         queue = deque([fn.sig_key])
         while queue:
             for caller in self._funcs[queue.popleft()].called_by:
-                if caller not in seen and caller in self._funcs:
+                if caller not in seen and caller in self._live:
                     seen.add(caller)
                     queue.append(caller)
         seen.discard(fn.sig_key)
@@ -278,6 +294,20 @@ class FunctionEffectAnalyzer:
 
     # ── Data coupling ───────────────────────────────────────────────────────
 
+    def _users_by_variable(self) -> Tuple[Dict[_VarKey, Set[str]], Dict[_VarKey, Set[str]]]:
+        """(readers, writers): variable key -> sig_keys of the live functions that read / write it; built once."""
+        if self._variable_users is None:
+            readers: Dict[_VarKey, Set[str]] = {}
+            writers: Dict[_VarKey, Set[str]] = {}
+            for key, other in self._live.items():
+                reads, writes = (_keys(a) for a in self._accesses(other))
+                for k in reads:
+                    readers.setdefault(k, set()).add(key)
+                for k in writes:
+                    writers.setdefault(k, set()).add(key)
+            self._variable_users = (readers, writers)
+        return self._variable_users
+
     def _data_coupling(self, fn: FunctionDef, reads: List[VariableAccess],
                        writes: List[VariableAccess]) -> Tuple[List[str], List[CoupledComponent]]:
         """Functions that read what *fn* writes or write what it reads, and the components that touch
@@ -287,22 +317,21 @@ class FunctionEffectAnalyzer:
         related = ({fn.class_name} | set(self._hierarchy.ancestors(fn.class_name))
                    | set(self._hierarchy.descendants(fn.class_name))) if fn.class_name else set()
         own = _component(fn)
+        readers, writers = self._users_by_variable()
+
+        def visible(key: _VarKey, other: FunctionDef) -> bool:
+            return other is not fn and (key[0] == 'global' or other.class_name in related)
+
         coupled: Set[str] = set()
+        for keys, partners in ((w_keys, readers), (r_keys, writers)):
+            for key in keys:
+                coupled |= {o for o in partners.get(key, ()) if visible(key, self._funcs[o])}
         shared_with: Dict[str, Dict[_VarKey, List[str]]] = {}
-        for other in self._funcs.values():
-            if other is fn:
-                continue
-            g_reads, g_writes = (_keys(a) for a in self._accesses(other))
-            members_ok = other.class_name in related
-
-            def visible(keys: Set[_VarKey]) -> Set[_VarKey]:
-                return {k for k in keys if k[0] == 'global' or members_ok}
-
-            if visible((w_keys & g_reads) | (r_keys & g_writes)):
-                coupled.add(other.sig_key)
-            if _component(other) != own:
-                for key in visible((r_keys | w_keys) & (g_reads | g_writes)):
-                    shared_with.setdefault(_component(other), {}).setdefault(key, []).append(other.sig_key)
+        for key in r_keys | w_keys:
+            for o in readers.get(key, set()) | writers.get(key, set()):
+                other = self._funcs[o]
+                if self._components[o] != own and visible(key, other):
+                    shared_with.setdefault(self._components[o], {}).setdefault(key, []).append(o)
         components = [
             CoupledComponent(name, 'data', '; '.join(
                 f"shares {_describe_key(key)} with {', '.join(sorted(funcs))}"

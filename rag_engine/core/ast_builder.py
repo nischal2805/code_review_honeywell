@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import List, Optional, Set, Tuple
+import re
+from typing import Callable, List, Optional, Set, Tuple, Union
 from tree_sitter import Node
 
 
@@ -57,6 +58,55 @@ def compute_nesting_depth(func_node: Node) -> int:
         return max(depth(child, current) for child in node.children)
 
     return max(0, depth(func_node, 0) - 1)
+
+
+_STD_TYPE = re.compile(r'(?:std::.*|u?int(?:_least|_fast)?\d+_t|u?intptr_t|s?size_t|ptrdiff_t|wchar_t|char\d+_t)$')
+
+
+def declared_type_names(root: Node, source: bytes) -> Set[str]:
+    """Short names of the classes, structs, unions, enums, typedefs and aliases declared in a tree."""
+    names: Set[str] = set()
+    for node in find_nodes(root, 'class_specifier', 'struct_specifier', 'union_specifier', 'enum_specifier',
+                           'alias_declaration', 'type_definition'):
+        if node.type == 'type_definition':
+            for declarator in node.children_by_field_name('declarator'):
+                found: Optional[Node] = declarator
+                while found is not None and found.type != 'type_identifier':
+                    found = found.child_by_field_name('declarator') or next(iter(found.named_children), None)
+                if found is not None:
+                    names.add(get_text(found, source))
+        else:
+            name = node.child_by_field_name('name')
+            if name is not None:
+                names.add(re.sub(r'<.*>', '', get_text(name, source)).rsplit('::', 1)[-1].strip())
+    return names
+
+
+def constructed_by_arguments(declarator: Node, source: bytes, type_names: Union[Set[str], Callable[[], Set[str]]]) -> bool:
+    """``Uart g(UART1_BASE);`` as tree-sitter reads it: a function declarator whose every parameter is a lone
+    name that is not a known type, i.e. an object built from named constants, not a prototype.
+
+    *type_names* are all type names known to the caller (see declared_type_names), or a function that
+    returns them, called only when the shape fits; a prototype ``Uart make(Config);`` whose parameter
+    type is declared nowhere the caller looked cannot be told apart.
+    """
+    # shortcut: a prototype with an unnamed parameter of a type declared in no parsed file reads as an object.
+    name = declarator.child_by_field_name('declarator')
+    params = declarator.child_by_field_name('parameters')
+    if declarator.type != 'function_declarator' or params is None or name is None or name.type not in (
+            'identifier', 'qualified_identifier'):
+        return False
+    lone: List[str] = []
+    for param in (c for c in params.named_children if c.type != 'comment'):
+        only = param.named_children[0] if param.type == 'parameter_declaration' and param.named_child_count == 1 else None
+        text = get_text(only, source).strip() if only is not None else ''
+        if only is None or only.type not in ('type_identifier', 'qualified_identifier') or _STD_TYPE.match(text):
+            return False
+        lone.append(text.rsplit('::', 1)[-1])
+    if not lone:
+        return False
+    known = type_names() if callable(type_names) else type_names
+    return not any(n in known for n in lone)
 
 
 def extract_identifiers(node: Node, source: bytes) -> List[str]:

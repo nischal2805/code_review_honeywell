@@ -90,6 +90,10 @@ class ClassHierarchy:
         self._by_key: Dict[str, Dict[Tuple, str]] = {}           # class -> override key -> sig_key
         self._roots: Set[str] = set()
         self._merge_classes(parse_results)
+        self._by_short_name: Dict[str, List[str]] = {}           # last name component -> qualified class names
+        for cls in self.classes:
+            self._by_short_name.setdefault(cls.rsplit('::', 1)[-1], []).append(cls)
+        self._resolved: Dict[Tuple[str, Optional[str]], Optional[str]] = {}
         self._link_bases()
         self._index_methods(parse_results)
         self._classify_virtuals()
@@ -105,13 +109,15 @@ class ClassHierarchy:
                     self.classes[cdef.name] = ClassDef(
                         name=cdef.name, file_path=cdef.file_path, line_number=cdef.line_number,
                         end_line_number=cdef.end_line_number, bases=list(cdef.bases),
-                        methods=list(cdef.methods), fields=list(cdef.fields), is_struct=cdef.is_struct)
+                        methods=list(cdef.methods), fields=list(cdef.fields), is_struct=cdef.is_struct,
+                        field_inits=list(cdef.field_inits))
                     continue
                 have.bases += [b for b in cdef.bases if b not in have.bases]
                 known = {m.sig_key for m in have.methods}
                 have.methods += [m for m in cdef.methods if m.sig_key not in known]
                 names = {f.name for f in have.fields}
                 have.fields += [f for f in cdef.fields if f.name not in names]
+                have.field_inits += [i for i in cdef.field_inits if i not in have.field_inits]
 
     def _link_bases(self) -> None:
         for name, cdef in self.classes.items():
@@ -208,6 +214,12 @@ class ClassHierarchy:
 
         Looks outwards from *scope* like C++ name lookup does.
         """
+        key = (name, scope)
+        if key not in self._resolved:
+            self._resolved[key] = self._resolve_class(name, scope)
+        return self._resolved[key]
+
+    def _resolve_class(self, name: str, scope: Optional[str]) -> Optional[str]:
         name = re.sub(r'<.*>', '', name).strip()
         parts = scope.split('::') if scope else []
         if name.startswith('::'):
@@ -220,7 +232,7 @@ class ClassHierarchy:
                 return candidate
         # shortcut: a unique class with this short name is assumed (covers using-directives and
         # aliases); upgrade with real using-declaration handling if names collide.
-        matches = [c for c in self.classes if c.endswith('::' + name)]
+        matches = [c for c in self._by_short_name.get(name.rsplit('::', 1)[-1], ()) if c.endswith('::' + name)]
         return matches[0] if len(matches) == 1 else None
 
     def bases(self, c: str) -> List[str]:
