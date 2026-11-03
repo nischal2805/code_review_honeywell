@@ -13,7 +13,9 @@ entry_point_patterns:
   - '*_ISR'
   - 'ISR_*'
   - '*Task'
-dead_code_dispositions: ''   # YAML of reviewed findings: findings: {DC-FUNC-1A2B3C4D: {status, justification, reviewer}}
+# Path to a YAML file of reviewed findings (relative paths are resolved from this file); empty = none. The file holds
+#   findings: {DC-FUNC-1A2B3C4D: {status: confirmed_dead | false_positive | deactivated | open, justification: ..., reviewer: ...}}
+dead_code_dispositions: ''
 lru_names:
   - Motor
   - Battery

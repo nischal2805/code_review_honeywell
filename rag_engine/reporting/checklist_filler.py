@@ -5,10 +5,17 @@ from pathlib import Path
 from typing import List, Literal, Optional
 
 from rag_engine.config import Config
-from rag_engine.features.dead_code_detector import DeadCodeReport
+from rag_engine.features.dead_code_detector import CLOSED_STATUSES, DeadCodeReport
 from rag_engine.features.sensor_analysis import SensorAnalysisResult
 from rag_engine.features.standards_validator import ComplianceReport
 from rag_engine.features.virtual_analysis import VirtualAnalysisResult
+from rag_engine.models import DeadCodeItem
+
+
+def _reviewed(item: DeadCodeItem) -> bool:
+    """A reviewer closed the finding with a documented status and a justification; any other status
+    (a typo, an old value) counts as no decision."""
+    return item.review_status in CLOSED_STATUSES and bool(item.reviewer_justification)
 
 
 @dataclass
@@ -43,7 +50,7 @@ class ChecklistFiller:
             'All Category 2 changes scheduled for reverification', 'PASS',
             str(sum(1 for c in virtual.changes if c.do178c_category == 'Category 2')) + ' Cat2 changes'))
         # An override nobody can reach is dead code unless a reviewer dispositioned its finding.
-        justified = {i.name for i in dead.items if i.review_status != 'open' and i.reviewer_justification}
+        justified = {i.name for i in dead.items if _reviewed(i)}
         unreached = [o.function for v in virtual.inventory for o in v.overridden_by
                      if not o.reachable and o.function not in justified]
         cl.items.append(ChecklistItem('virtual_analysis', 'VA-03',
@@ -59,7 +66,7 @@ class ChecklistFiller:
             'PASS' if all(i.do178c_disposition for i in dead.items) else 'OPEN',
             f"{len(dead.items)} items with disposition"))
         open_dead = sum(1 for i in dead.items
-                        if i.category == 'dead_code' and i.confidence == 'high' and i.review_status == 'open')
+                        if i.category == 'dead_code' and i.confidence == 'high' and not _reviewed(i))
         cl.items.append(ChecklistItem('dead_code', 'DC-03',
             'No open high-confidence dead code findings',
             'PASS' if open_dead == 0 else 'OPEN',

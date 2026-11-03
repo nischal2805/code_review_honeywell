@@ -1,5 +1,6 @@
 from __future__ import annotations
 import bisect
+import fnmatch
 import hashlib
 import os
 import re
@@ -25,13 +26,17 @@ _OPERATOR_PAT = re.compile(r'operator(?!\w)')
 _DEFINE_LINE = re.compile(r'^[ \t]*#[ \t]*define\b(?:[^\n]*\\\n)*[^\n]*', re.M)
 _DIRECTIVE = re.compile(r'^[ \t]*#[ \t]*(ifdef|ifndef|if|elif|else|endif)\b([^\n]*)', re.M)
 _IDENT = re.compile(r'\b[A-Za-z_]\w*')
-_ADDRESS_OF = re.compile(r'&\s*(?:\w+\s*::\s*)*$')           # "&", "&C::", "&Ns::C::" right before a name
+_ADDRESS_OF = re.compile(r'&\s*(?:(?:\w+\s*)?::\s*)*$')   # "&", "&C::", "&Ns::C::", "&::" right before a name
 _SCOPE = re.compile(r'(?:(?:\w+\s*)?::\s*)+$')               # "C::", "Ns::C::", "::" right before a name
 _ASSIGNED_OR_LISTED = re.compile(r'(?:[=,{(]|\breturn)$')
 _UNARY_KEYWORD = re.compile(r'\b(?:return|case|throw|co_return|co_yield)$')
 _CATEGORIES = ('dead_code', 'deactivated_code', 'unused_export', 'dead_fragment', 'unused_variable')
 _HEADER_SUFFIXES = ('.h', '.hpp')
+_PROTOTYPE = re.compile(r'^[ \t]*(?!(?:return|else|throw|delete|case|goto)\b)[A-Za-z_][\w:<>,*&\s]*?[\s*&]'
+                        r'(operator[^\s(]+|[A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?;', re.M)   # name of a function prototype
 _MAX_EVIDENCE = 3
+DISPOSITION_STATUSES = ('open', 'confirmed_dead', 'false_positive', 'deactivated')
+CLOSED_STATUSES = DISPOSITION_STATUSES[1:]      # a reviewer's outcome; 'open' means no decision yet
 
 
 def _is_callback_name(qualified: str) -> bool:
@@ -91,7 +96,7 @@ def _reference_kind(before: str, after: str) -> Optional[Tuple[str, bool]]:
         # Unary after an operator, a keyword (return &f) or a cast ((void*)&f); a word, ], > , & or * before
         # it means a binary &, && or a reference declarator (Config& c, Frame&& f).
         if not (prev.isalnum() or prev in ('_', ']', '>', '&', '*')) or _UNARY_KEYWORD.search(left):
-            return 'address', '::' in amp.group()
+            return 'address', bool(re.search(r'\w\s*::', amp.group()))
     core = before.rstrip()
     scope = _SCOPE.search(core)
     if scope:
@@ -142,6 +147,7 @@ class DeadCodeDetector:
         self._line_starts: Dict[str, List[int]] = {}   # offset of each line start, per file
         self._scopes: Dict[str, Tuple[List[int], list, List[int]]] = {}   # per file: function spans, nesting
         self._trees: Dict[str, Node] = {}
+        self._prototypes: Optional[Dict[str, List[str]]] = None   # function prototyped in a header -> those headers
         try:
             self._root = os.path.commonpath([str(Path(p).parent) for p in parse_results]) if parse_results else ''
         except ValueError:                           # relative and absolute paths, or different drives
@@ -152,6 +158,7 @@ class DeadCodeDetector:
         if not gb.built:
             gb.build()
         entries, warnings = gb.resolve_entry_points(self._entry_points, self._patterns)
+        warnings += self._pattern_warnings()
         reachable = gb.reachable_from(entries | gb.implicit_entry_points())
         unreachable = sorted(set(self._all_funcs) - reachable)
         entry_names = sorted(entries)
@@ -184,6 +191,28 @@ class DeadCodeDetector:
             false_positive_notes=notes, structural_coverage_impact=self._coverage_impact(items),
             warnings=warnings, entry_points_used=entry_names,
             counts_by_category={c: counts[c] for c in _CATEGORIES}, unresolved_calls=unresolved)
+
+    def _pattern_warnings(self) -> List[str]:
+        """A configured pattern that matches nothing (a typo) and patterns that match most of the code
+        (``*`` from a mistyped list), which would hide every dead function."""
+        # Same rule as CallGraphBuilder.resolve_entry_points: a pattern without `::` matches the short name of
+        # a free function, one with `::` the qualified name; code under `#if 0` is never an entry point.
+        live = [(key, fn.name, fn.name.rsplit('::', 1)[-1], fn.class_name is None)
+                for key, fn in self._all_funcs.items() if not fn.never_built]
+        warnings: List[str] = []
+        matched: Set[str] = set()
+        for pattern in self._patterns:
+            qualified = '::' in pattern
+            hits = {key for key, name, short, free in live
+                    if (qualified and fnmatch.fnmatchcase(name, pattern)) or (not qualified and free and fnmatch.fnmatchcase(short, pattern))}
+            matched |= hits
+            # the built-in patterns are speculative (most codebases have no `*_ISR`): only the user's own are checked
+            if not hits and pattern not in DEFAULT_ENTRY_POINT_PATTERNS:
+                warnings.append(f"entry_point_pattern '{pattern}' matches nothing")
+        total = len(self._all_funcs)
+        if total and len(matched) * 2 > total:
+            warnings.append(f"entry_point_patterns match {len(matched)} of {total} functions — check the configuration")
+        return warnings
 
     # ── Functions ───────────────────────────────────────────────────────────
 
@@ -221,12 +250,11 @@ class DeadCodeDetector:
         return _Verdict('dead_code', 'Remove', 'high',
                         f"no call path from entry points [{', '.join(entry_names) or 'none resolved'}]", kind)
 
-    def _investigate_callees_of_possibly_live(self, items: List[DeadCodeItem]) -> None:
-        """A function under Investigate may be live, and so may everything only it calls: those functions
-        move from dead_code to Investigate/low, with the call path as evidence."""
+    def _reached_from(self, seeds: List[str]) -> Dict[str, List[str]]:
+        """function -> up to three of *seeds* that reach it."""
         graph = self._graph.graph
-        labels: Dict[str, List[str]] = {}         # function -> up to three possibly-live functions that reach it
-        for seed in sorted(i.name for i in items if i.category == 'unused_export'):
+        labels: Dict[str, List[str]] = {}
+        for seed in seeds:
             seen = {seed}
             stack = list(graph.successors(seed))
             while stack:
@@ -236,12 +264,34 @@ class DeadCodeDetector:
                 seen.add(node)
                 labels.setdefault(node, []).append(seed)
                 stack.extend(graph.successors(node))
+        return labels
+
+    def _investigate_callees_of_possibly_live(self, items: List[DeadCodeItem]) -> None:
+        """A function under Investigate may be live, and so may everything only it calls: those functions
+        move from dead_code to Investigate/low.  Everything only called from code built under a
+        ``#ifdef`` / ``#if X`` guard moves to Justify as Deactivated/medium (other configurations build it).
+        The call path is the evidence.  Callees of ``#if 0`` code stay dead: no configuration builds it."""
+        graph = self._graph.graph
+        # shortcut: a callee shared by guarded and possibly-live code is Investigate (the more cautious verdict).
+        live = self._reached_from(sorted(i.name for i in items if i.category == 'unused_export'))
+        guarded = self._reached_from(sorted(i.name for i in items if i.category == 'deactivated_code'
+                                            and self._all_funcs[i.name].preproc_guard
+                                            and not self._all_funcs[i.name].never_built))
         for item in items:
-            if item.category == 'dead_code' and item.name in labels:
-                seeds = labels[item.name]
+            if item.category != 'dead_code':
+                continue
+            if item.name in live:
+                seeds = live[item.name]
                 item.category, item.do178c_disposition, item.confidence = 'unused_export', 'Investigate', 'low'
                 item.reason = f"only reachable from possibly-live {', '.join(seeds)}"
-                item.evidence = [' → '.join(nx.shortest_path(graph, seeds[0], item.name))]
+            elif item.name in guarded:
+                seeds = guarded[item.name]
+                item.category, item.do178c_disposition, item.confidence = 'deactivated_code', 'Justify as Deactivated', 'medium'
+                item.reason = ("only reachable from code built when "
+                               + ', '.join(f"{self._all_funcs[s].preproc_guard} ({s})" for s in seeds))
+            else:
+                continue
+            item.evidence = [' → '.join(nx.shortest_path(graph, seeds[0], item.name))]
 
     def _instantiated(self, cls: str) -> bool:
         """The class or one of its subclasses is constructed somewhere."""
@@ -398,14 +448,18 @@ class DeadCodeDetector:
             return info.file_path if info.file_path != fn.file_path else None
         # shortcut: a free function's prototype is found by name in the other headers (overloads are
         # not told apart); upgrade by parsing prototypes in the parser.
-        short = re.escape(fn.name.rsplit('::', 1)[-1])
-        prototype = re.compile(r'^[ \t]*(?!(?:return|else|throw|delete|case|goto)\b)[A-Za-z_][\w:<>,*&\s]*?[\s*&]'
-                               + short + r'\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?;', re.M)
-        for path, result in sorted(self._results.items()):
-            if path != fn.file_path and path.endswith(_HEADER_SUFFIXES):
-                if prototype.search(result.raw_source.decode('utf-8', errors='replace')):
-                    return path
-        return None
+        short = fn.name.rsplit('::', 1)[-1]
+        return next((path for path in self._prototype_headers(short) if path != fn.file_path), None)
+
+    def _prototype_headers(self, short: str) -> List[str]:
+        """Headers (sorted) that declare a free function *short*: one pass over every header, on first use."""
+        if self._prototypes is None:
+            self._prototypes = {}
+            for path, result in sorted(self._results.items()):
+                if path.endswith(_HEADER_SUFFIXES):
+                    for name in {m.group(1) for m in _PROTOTYPE.finditer(result.raw_source.decode('utf-8', errors='replace'))}:
+                        self._prototypes.setdefault(name, []).append(path)
+        return self._prototypes.get(short, [])
 
     # ── Fragments and variables ─────────────────────────────────────────────
 
@@ -475,7 +529,8 @@ class DeadCodeDetector:
         return f"DC-{kind}-{hashlib.sha1(text.encode('utf-8')).hexdigest()[:8].upper()}"
 
     def _apply_dispositions(self, items: List[DeadCodeItem], warnings: List[str]) -> None:
-        """``findings: {<id>: {status, justification, reviewer}}``; an entry needs status and justification."""
+        """``findings: {<id>: {status, justification, reviewer}}``; an entry needs a status (one of
+        DISPOSITION_STATUSES) and a justification, and is ignored with a warning otherwise."""
         path = self._dispositions_file
         if not path:
             return
@@ -503,6 +558,10 @@ class DeadCodeDetector:
             if not justification or not status:
                 warnings.append(f"Disposition {finding_id} ignored: "
                                 f"no {'justification' if not justification else 'status'}")
+                continue
+            if status not in DISPOSITION_STATUSES:
+                warnings.append(f"disposition {finding_id}: unknown status '{status}' "
+                                f"(allowed: {', '.join(DISPOSITION_STATUSES)})")
                 continue
             item.review_status, item.reviewer_justification = status, justification
             item.reviewer = str(entry['reviewer']) if entry.get('reviewer') else None

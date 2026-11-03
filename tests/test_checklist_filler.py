@@ -59,8 +59,17 @@ def test_va03_passes_once_the_unreachable_overrides_are_justified(results, tmp_p
     dead = deepcopy(results.dead)
     for i in dead.items:
         if i.name in ('AltitudeSensor::read()', 'AltitudeSensor::selfTest()'):
-            i.review_status, i.reviewer_justification = 'justified', 'Altitude sensor is not fitted on this LRU'
+            i.review_status, i.reviewer_justification = 'false_positive', 'Altitude sensor is not fitted on this LRU'
     assert _fill(results, tmp_path, dead=dead)['VA-03'].status == 'PASS'
+
+
+@pytest.mark.parametrize('status', ['justified', 'open', 'typo'])
+def test_va03_ignores_statuses_that_are_not_a_review_outcome(results, tmp_path, status):
+    dead = deepcopy(results.dead)
+    for i in dead.items:
+        if i.name in ('AltitudeSensor::read()', 'AltitudeSensor::selfTest()'):
+            i.review_status, i.reviewer_justification = status, 'Altitude sensor is not fitted on this LRU'
+    assert _fill(results, tmp_path, dead=dead)['VA-03'].status == 'OPEN'
 
 
 def test_generate_all_writes_the_sensor_report_only_when_given_sensors(results, tmp_path):

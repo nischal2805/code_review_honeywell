@@ -40,10 +40,10 @@ Coverage impact: {{ coverage_impact }}
 ## Findings
 {% if items %}
 
-| ID | File | Function/Symbol | Lines | Type | Reason | Confidence | Status |
-|----|------|-----------------|-------|------|--------|------------|--------|
+| ID | File | Function/Symbol | Lines | Category | Disposition | Reason | Confidence | Status |
+|----|------|-----------------|-------|----------|-------------|--------|------------|--------|
 {% for i in items %}
-| {{ i.finding_id }} | {{ i.file_path.split('\\')[-1].split('/')[-1] }} | {{ (i.name if i.symbol_type in ('function', 'method') else i.function_name ~ ' / ' ~ i.name) | replace('|', '\\|') }} | {{ i.line_number if i.end_line <= i.line_number else '%d-%d' % (i.line_number, i.end_line) }} | {{ i.symbol_type }} | {{ i.reason | replace('|', '\\|') }} | {{ i.confidence }} | {{ i.review_status }} |
+| {{ i.finding_id }} | {{ i.file_path.split('\\')[-1].split('/')[-1] }} | {{ (i.name if i.symbol_type in ('function', 'method') else i.function_name ~ ' / ' ~ i.name) | replace('|', '\\|') }} | {{ i.line_number if i.end_line <= i.line_number else '%d-%d' % (i.line_number, i.end_line) }} | {{ i.category }} | {{ i.do178c_disposition }} | {{ i.reason | replace('|', '\\|') }} | {{ i.confidence }} | {{ i.review_status }} |
 {% endfor %}
 {% else %}
 

@@ -1,4 +1,6 @@
 import json
+import os
+import time
 import re
 import shutil
 from pathlib import Path
@@ -352,24 +354,53 @@ def _write_dispositions(path, findings):
 def test_dispositions_are_applied(tmp_path):
     ids = _ids(_sensors())
     path = _write_dispositions(tmp_path / 'd.yaml', {
-        ids['legacyCalibrate()']: {'status': 'accepted', 'justification': 'kept for rollback', 'reviewer': 'NR'}})
+        ids['legacyCalibrate()']: {'status': 'confirmed_dead', 'justification': 'kept for rollback', 'reviewer': 'NR'}})
     report = _sensors(dispositions_file=path)
     item = _by_category(report, 'dead_code')['legacyCalibrate()']
-    assert (item.review_status, item.reviewer_justification, item.reviewer) == ('accepted', 'kept for rollback', 'NR')
+    assert (item.review_status, item.reviewer_justification, item.reviewer) == ('confirmed_dead', 'kept for rollback', 'NR')
     assert _by_category(report, 'dead_code')['orphanHelper()'].review_status == 'open'
     assert not report.warnings
 
 
 def test_disposition_without_justification_is_ignored_with_a_warning(tmp_path):
     ids = _ids(_sensors())
-    path = _write_dispositions(tmp_path / 'd.yaml', {ids['legacyCalibrate()']: {'status': 'accepted'}})
+    path = _write_dispositions(tmp_path / 'd.yaml', {ids['legacyCalibrate()']: {'status': 'confirmed_dead'}})
     report = _sensors(dispositions_file=path)
     assert _by_category(report, 'dead_code')['legacyCalibrate()'].review_status == 'open'
     assert any(ids['legacyCalibrate()'] in w and 'justification' in w for w in report.warnings)
 
 
+def test_all_documented_statuses_are_accepted(tmp_path):
+    ids = _ids(_sensors())
+    names = ['legacyCalibrate()', 'orphanHelper()']
+    for status in ('open', 'confirmed_dead', 'false_positive', 'deactivated'):
+        path = _write_dispositions(tmp_path / 'd.yaml', {ids[n]: {'status': status, 'justification': 'ok'} for n in names})
+        report = _sensors(dispositions_file=path)
+        assert {report_item.review_status for report_item in report.items if report_item.name in names} == {status}
+        assert not report.warnings
+
+
+@pytest.mark.parametrize('status', ['accepted', 'justified', 'Confirmed_Dead', 'false positive', 'true'])
+def test_an_unknown_status_is_ignored_with_a_warning(tmp_path, status):
+    ids = _ids(_sensors())
+    path = _write_dispositions(tmp_path / 'd.yaml', {ids['legacyCalibrate()']: {'status': status, 'justification': 'ok'}})
+    report = _sensors(dispositions_file=path)
+    item = _by_category(report, 'dead_code')['legacyCalibrate()']
+    assert (item.review_status, item.reviewer_justification) == ('open', None)
+    expected = (f"disposition {ids['legacyCalibrate()']}: unknown status '{status}' "
+                "(allowed: open, confirmed_dead, false_positive, deactivated)")
+    assert expected in report.warnings
+
+
+def test_a_boolean_status_is_an_unknown_status(tmp_path):
+    ids = _ids(_sensors())
+    path = _write_dispositions(tmp_path / 'd.yaml', {ids['legacyCalibrate()']: {'status': True, 'justification': 'ok'}})
+    report = _sensors(dispositions_file=path)
+    assert any("unknown status 'True'" in w for w in report.warnings)
+
+
 def test_disposition_for_an_unknown_id_is_a_stale_warning(tmp_path):
-    path = _write_dispositions(tmp_path / 'd.yaml', {'DC-FUNC-00000000': {'status': 'accepted', 'justification': 'x'}})
+    path = _write_dispositions(tmp_path / 'd.yaml', {'DC-FUNC-00000000': {'status': 'confirmed_dead', 'justification': 'x'}})
     report = _sensors(dispositions_file=path)
     assert any('stale disposition' in w and 'DC-FUNC-00000000' in w for w in report.warnings)
 
@@ -387,10 +418,10 @@ def test_report_and_findings_json(tmp_path):
     text = Path(gen.generate_dead_code(report, format='markdown')).read_text(encoding='utf-8')
     for section in ('## Analysis Scope', '## Warnings', '## Summary', '## Findings', '## Finding Details'):
         assert section in text
-    assert '| ID | File | Function/Symbol | Lines | Type | Reason | Confidence | Status |' in text
+    assert '| ID | File | Function/Symbol | Lines | Category | Disposition | Reason | Confidence | Status |' in text
     assert 'TIMER0_IRQHandler()' in text and "Entry point 'doesNotExist' not found" in text
     orphan = next(i for i in report.items if i.name == 'orphanHelper()')
-    assert f'| {orphan.finding_id} | main.cpp | orphanHelper() | 24-26 | function |' in text
+    assert f'| {orphan.finding_id} | main.cpp | orphanHelper() | 24-26 | dead_code | Remove |' in text
     assert 'callers: none' in text and 'dead_code' in text
 
     data = json.loads((tmp_path / 'dead_code_findings.json').read_text(encoding='utf-8'))
@@ -431,10 +462,17 @@ def test_checklist_dc03_is_open_while_a_high_confidence_dead_function_is_open(tm
     report = _sensors()
     assert _checklist(tmp_path, report)['DC-03'].status == 'OPEN'
     ids = _ids(report)
-    dispositions = {ids[n]: {'status': 'accepted', 'justification': 'ok'}
+    dispositions = {ids[n]: {'status': 'confirmed_dead', 'justification': 'ok'}
                     for n in _by_category(report, 'dead_code')}
     closed = _sensors(dispositions_file=_write_dispositions(tmp_path / 'd.yaml', dispositions))
     assert _checklist(tmp_path, closed)['DC-03'].status == 'PASS'
+
+
+def test_checklist_dc03_stays_open_for_a_status_that_is_not_documented(tmp_path):
+    report = _sensors()
+    for item in _by_category(report, 'dead_code').values():          # as if an old tool or a hand edit set it
+        item.review_status, item.reviewer_justification = 'accepted', 'ok'
+    assert _checklist(tmp_path, report)['DC-03'].status == 'OPEN'
 
 
 def test_checklist_dc03_ignores_other_categories(tmp_path):
@@ -766,6 +804,19 @@ def test_address_of_after_a_keyword_or_a_cast_is_a_reference(tmp_path):
     assert (found['pick(int)'].category, found['pick(int)'].confidence) == ('dead_code', 'high')
 
 
+def test_global_scope_address_of_is_a_reference(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': (
+        'typedef void (*Fn)();\nvoid cmdA() {}\nvoid cmdB() {}\nvoid cmdC() {}\n'
+        'class Ctl { public: void cmdD() {} };\n'
+        'static const Fn table[] = { &::cmdA, & ::cmdB };\nFn pick() { return &::cmdC; }\n'
+        'void* viaMember = (void*)&::cmdD;\nint main() { int x = 1, y = 2; return x &::cmdD; }\n')})
+    found = _functions(_detector(tmp_path, ['main']).analyze())
+    for name in ('cmdA()', 'cmdB()', 'cmdC()'):
+        assert (found[name].category, found[name].confidence) == ('unused_export', 'low'), name
+    # `&::cmdD` names a global function, never the member Ctl::cmdD; a binary `x &::cmdD` is not an address
+    assert found['Ctl::cmdD()'].category == 'dead_code'
+
+
 def test_callbacks_nested_in_control_statements_keep_their_edges(tmp_path):
     _source_tree(tmp_path, {'a.cpp': (
         'typedef void (*Fn)();\nbool registerCb(Fn cb) { return cb != 0; }\n'
@@ -834,3 +885,173 @@ def test_keywords_and_locals_are_not_callbacks(tmp_path):
     found = _functions(_detector(tmp_path, ['main']).analyze())
     assert {n: (i.category, i.confidence) for n, i in found.items()} == {
         'status()': ('dead_code', 'high'), 'limit()': ('dead_code', 'high')}      # onTimerTick has its callback edge
+
+
+# ── Final review A2 ────────────────────────────────────────────────────────────
+
+_FEATURE_X = (
+    'void featureHelper() {}\nvoid deepHelper() {}\nvoid mid() { deepHelper(); }\n'
+    '#ifdef FEATURE_X\nvoid featureX() { featureHelper(); mid(); }\n#endif\nint main() { return 0; }\n')
+
+
+def test_functions_reachable_only_from_guarded_code_are_deactivated_not_removed(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': _FEATURE_X})
+    found = _functions(_detector(tmp_path, ['main']).analyze())
+    assert (found['featureX()'].category, found['featureX()'].confidence) == ('deactivated_code', 'medium')
+    helper = found['featureHelper()']
+    assert (helper.category, helper.do178c_disposition, helper.confidence) == ('deactivated_code', 'Justify as Deactivated', 'medium')
+    assert helper.reason == 'only reachable from code built when FEATURE_X (featureX())'
+    assert helper.evidence == ['featureX() → featureHelper()']
+    deep = found['deepHelper()']                                    # transitive: featureX → mid → deepHelper
+    assert (deep.category, deep.confidence) == ('deactivated_code', 'medium')
+    assert deep.evidence == ['featureX() → mid() → deepHelper()']
+
+
+def test_guarded_callee_is_not_counted_as_dead_code(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': _FEATURE_X})
+    report = _detector(tmp_path, ['main']).analyze()
+    assert report.dead_count == 0 and report.deactivated_count == 4
+    assert not any(i.category == 'dead_code' for i in report.items)
+
+
+def test_callees_of_if_0_code_stay_dead(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': (
+        'void oldStep() {}\nvoid newStep() {}\n#if 0\nvoid legacy() { oldStep(); }\n#endif\n'
+        'void run() { newStep(); }\nint main() { run(); return 0; }\n')})
+    found = _functions(_detector(tmp_path, ['main']).analyze())
+    assert (found['legacy()'].category, found['legacy()'].confidence) == ('deactivated_code', 'high')
+    assert (found['oldStep()'].category, found['oldStep()'].do178c_disposition, found['oldStep()'].confidence) == (
+        'dead_code', 'Remove', 'high')
+
+
+def test_a_callee_shared_by_if_0_and_guarded_code_is_deactivated(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': (
+        'void shared() {}\n#if 0\nvoid legacy() { shared(); }\n#endif\n'
+        '#ifdef FEATURE_X\nvoid featureX() { shared(); }\n#endif\nint main() { return 0; }\n')})
+    shared = _functions(_detector(tmp_path, ['main']).analyze())['shared()']
+    assert shared.category == 'deactivated_code' and shared.reason == 'only reachable from code built when FEATURE_X (featureX())'
+
+
+def test_a_callee_reachable_from_possibly_live_and_guarded_code_is_investigated(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': (
+        'typedef void (*Fn)();\nvoid shared() {}\nvoid cmdReset() { shared(); }\nstatic const Fn table[] = {cmdReset};\n'
+        '#ifdef FEATURE_X\nvoid featureX() { shared(); }\n#endif\nint main() { return 0; }\n')})
+    shared = _functions(_detector(tmp_path, ['main']).analyze())['shared()']
+    assert (shared.category, shared.do178c_disposition, shared.confidence) == ('unused_export', 'Investigate', 'low')
+
+
+def test_a_callee_that_is_also_called_from_live_code_is_not_reported(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': (
+        'void featureHelper() {}\n#ifdef FEATURE_X\nvoid featureX() { featureHelper(); }\n#endif\n'
+        'int main() { featureHelper(); return 0; }\n')})
+    found = _functions(_detector(tmp_path, ['main']).analyze())
+    assert set(found) == {'featureX()'}
+
+
+def test_a_pattern_that_matches_nothing_is_a_warning(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': 'int main() { return 0; }\nvoid pollJob() {}\nvoid dead() {}\n'})
+    report = _detector(tmp_path, ['main'], entry_point_patterns=['*Job', '*Jbo', 'Ctl::*']).analyze()
+    assert "entry_point_pattern '*Jbo' matches nothing" in report.warnings
+    assert "entry_point_pattern 'Ctl::*' matches nothing" in report.warnings
+    assert not any("'*Job'" in w for w in report.warnings)
+
+
+def test_default_patterns_that_match_nothing_do_not_warn(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': 'int main() { return 0; }\nvoid dead() {}\n'})
+    assert not [w for w in _detector(tmp_path, ['main']).analyze().warnings if 'pattern' in w]
+
+
+def test_patterns_matching_most_functions_are_a_warning(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': 'int main() { return 0; }\nvoid a() {}\nvoid b() {}\nvoid c() {}\n'})
+    report = _detector(tmp_path, ['main'], entry_point_patterns=['*']).analyze()
+    assert 'entry_point_patterns match 4 of 4 functions — check the configuration' in report.warnings
+    assert not report.items
+
+
+def test_patterns_matching_at_most_half_of_the_functions_do_not_warn(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': 'int main() { return 0; }\nvoid pollJob() {}\nvoid dead() {}\nvoid dead2() {}\n'})
+    report = _detector(tmp_path, ['main'], entry_point_patterns=['*Job', 'm*']).analyze()
+    assert not any('match' in w and 'functions' in w for w in report.warnings)       # 2 of 4
+
+
+def test_pattern_matches_follow_the_entry_point_rules(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': (
+        'int main() { return 0; }\nclass Ctl { public: void pollJob() {} };\n#if 0\nvoid hiddenJob() {}\n#endif\n')})
+    report = _detector(tmp_path, ['main'], entry_point_patterns=['*Job', 'Ctl::*Job', '*pollJob']).analyze()
+    # a short-name pattern only matches free functions, and `#if 0` code is never an entry point
+    assert "entry_point_pattern '*Job' matches nothing" in report.warnings
+    assert "entry_point_pattern '*pollJob' matches nothing" in report.warnings
+    assert not any("'Ctl::*Job'" in w for w in report.warnings)
+
+
+def test_declaring_header_is_found_for_free_functions_and_skips_the_defining_file(tmp_path):
+    _source_tree(tmp_path, {
+        'a.h': '#pragma once\nint shared(int x);\nstatic inline int helperA(int x);\nvoid unrelated();\n',
+        'b.h': 'extern "C" {\nvoid shared(int x, float y);\n}\n',
+        'a.cpp': '#include "a.h"\nint shared(int x) { return x; }\nint helperA(int x) { return x; }\nint main() { return 0; }\n',
+        'c.cpp': 'int onlyHere() { return 1; }\nint callsShared() { return shared(2) + 1; }\n'})
+    found = _functions(_detector(tmp_path, ['main']).analyze())
+    assert found['shared(int)'].removal_impact == ['remove declaration in a.h']
+    assert found['helperA(int)'].removal_impact == ['remove declaration in a.h']
+    assert 'remove declaration' not in ' '.join(found['onlyHere()'].removal_impact)
+    assert 'remove declaration' not in ' '.join(found['callsShared()'].removal_impact)
+
+
+def test_a_prototype_of_an_operator_function_is_still_found(tmp_path):
+    _source_tree(tmp_path, {
+        'a.h': 'struct P { int v; };\nbool operator==(const P& a, const P& b);\n',
+        'a.cpp': '#include "a.h"\nbool operator==(const P& a, const P& b) { return a.v == b.v; }\nint main() { return 0; }\n'})
+    found = _functions(_detector(tmp_path, ['main']).analyze())
+    assert any('remove declaration in a.h' in i.removal_impact for i in found.values())
+
+
+def test_headers_are_not_read_again_for_every_unreachable_function(tmp_path):
+    for m in range(8):
+        (tmp_path / f'mod{m}.h').write_text(''.join(f'int fn{m}_{f}(int x);\n' for f in range(10)))
+        (tmp_path / f'mod{m}.cpp').write_text(f'#include "mod{m}.h"\n'
+                                              + ''.join(f'int fn{m}_{f}(int x) {{ return x; }}\n' for f in range(10)))
+    (tmp_path / 'main.cpp').write_text('int main() { return 0; }\n')
+    results = CodeParser().parse_directory(str(tmp_path))
+    gb = CallGraphBuilder(results)
+    gb.build()
+    decodes = {}
+
+    class CountingBytes(bytes):
+        def decode(self, *args, **kwargs):
+            decodes[self.path] = decodes.get(self.path, 0) + 1
+            return super().decode(*args, **kwargs)
+
+    for path, result in results.items():
+        result.raw_source = CountingBytes(result.raw_source)
+        result.raw_source.path = path
+    found = _functions(DeadCodeDetector(gb, results, ['main']).analyze())
+    assert len(found) == 80 and all('remove declaration in mod' in ' '.join(i.removal_impact) for i in found.values())
+    headers = {p: n for p, n in decodes.items() if p.endswith('.h')}
+    assert headers and max(headers.values()) <= 2                    # the reference index and the prototype index, once each
+
+
+@pytest.mark.skipif(os.environ.get('SKIP_SCALE_TESTS') == '1', reason='scale test disabled')
+def test_dead_code_analysis_scales_with_the_number_of_headers(tmp_path):
+    """300 files, 3000 functions, nearly all unreachable: finding each one's declaring header used to scan
+    every header with its own regex (quadratic: minutes at 30000 functions)."""
+    modules, per_module = 150, 20
+    for m in range(modules):
+        (tmp_path / f'mod{m}.h').write_text(
+            '#pragma once\n' + ''.join(f'int fn{m}_{f}(int x);\n' for f in range(per_module)))
+        (tmp_path / f'mod{m}.cpp').write_text(
+            f'#include "mod{m}.h"\n' + ''.join(f'int fn{m}_{f}(int x) {{\n    return x + {f};\n}}\n' for f in range(per_module))
+            + ('int main() { return fn0_0(1); }\n' if m == 0 else ''))
+    detector = _detector(tmp_path, ['main'])
+    start = time.perf_counter()
+    report = detector.analyze()
+    elapsed = time.perf_counter() - start
+    assert len(_functions(report)) == modules * per_module - 1
+    assert all('remove declaration in mod' in ' '.join(i.removal_impact) for i in _functions(report).values())
+    assert elapsed < 20, f"dead code analysis of 3000 functions took {elapsed:.1f} s"
+
+
+def test_guarded_reason_names_up_to_three_guarded_callers(tmp_path):
+    _source_tree(tmp_path, {'a.cpp': 'void shared() {}\n' + ''.join(
+        f'#ifdef FEAT_{c}\nvoid feat{c}() {{ shared(); }}\n#endif\n' for c in 'ABCDE') + 'int main() { return 0; }\n'})
+    reason = _functions(_detector(tmp_path, ['main']).analyze())['shared()'].reason
+    assert reason == 'only reachable from code built when FEAT_A (featA()), FEAT_B (featB()), FEAT_C (featC())'
