@@ -210,7 +210,7 @@ def _types_match(inferred: str, param_type: str) -> bool:
 # Per-call-site iteration
 # ---------------------------------------------------------------------------
 
-def _iter_call_sites(body: str, call_token: str) -> Iterator[List[str]]:
+def _iter_call_sites(body: str, call_token: str, standalone: bool = False) -> Iterator[List[str]]:
     """Yield the argument list (as a list of expression strings) for every
     call site of *call_token* in *body*.
 
@@ -222,9 +222,13 @@ def _iter_call_sites(body: str, call_token: str) -> Iterator[List[str]]:
     - a bare name:               ``"process"``
     - a qualified name:          ``"Utils::log"``
     - a member-access token:     ``"c.calculate"``  /  ``"ptr->compute"``
+
+    With *standalone* the token must not be the tail of a longer expression
+    (``obj.f(``, ``p->f(``, ``ns::f(``, ``xf(``), so ``f`` matches plain calls only.
     """
     escaped = re.escape(call_token)
-    pattern = re.compile(escaped + r'\s*\(')
+    prefix = r'(?<![\w.:])(?<!->)' if standalone else ''
+    pattern = re.compile(prefix + escaped + r'\s*\(')
     pos = 0
     while True:
         m = pattern.search(body, pos)
@@ -257,6 +261,7 @@ def _filter_candidates(
     call_token: str,
     body: str,
     all_funcs: Dict[str, FunctionDef],
+    standalone: bool = False,
 ) -> Set[str]:
     """Resolve *candidates* to the best-matching overload(s) given all call
     sites of *call_token* in *body*.
@@ -282,7 +287,7 @@ def _filter_candidates(
     result: Set[str] = set()
     found_any_site = False
 
-    for arg_exprs in _iter_call_sites(body, call_token):
+    for arg_exprs in _iter_call_sites(body, call_token, standalone):
         found_any_site = True
         arity = len(arg_exprs)
 
@@ -624,4 +629,24 @@ class CallGraphBuilder:
                         if '::' not in sig_key.split('(')[0]:
                             resolved.add(sig_key)
 
+        # ── Pass 7: Direct self-recursion ─────────────────────────────────────
+        # The passes above never emit a self-edge so conservative fan-out cannot
+        # fabricate recursion.  Only a plain call or a qualified C::m(...) call
+        # that resolves to this very overload is kept.
+        if self._calls_itself(fn, body, _by_qualified):
+            resolved.add(fn.sig_key)
+
         return resolved
+
+    def _calls_itself(self, fn: FunctionDef, body: str, by_qualified: Dict[str, Set[str]]) -> bool:
+        parts = fn.name.split('::')
+        # shortcut: an unqualified m() inside a method is an implicit this-call and is not
+        # matched here; upgrade when this-call resolution exists.
+        tokens = ['::'.join(parts[i:]) for i in range(len(parts) - (1 if fn.class_name else 0))]
+        overloads = by_qualified.get(fn.name, {fn.sig_key})
+        for token in tokens:
+            if next(_iter_call_sites(body, token, standalone=True), None) is None:
+                continue
+            if fn.sig_key in _filter_candidates(overloads, token, body, self._all_funcs, standalone=True):
+                return True
+        return False

@@ -31,6 +31,15 @@ class FunctionDef:
     data_reads: Set[str] = field(default_factory=set)
     data_writes: Set[str] = field(default_factory=set)
     do178c_requirement_trace: Optional[str] = None
+    # Enclosing class for in-class definitions, or the written qualifier for out-of-line
+    # ``X::m`` (X may still be a namespace here; later analysis corrects it).
+    class_name: Optional[str] = None
+    end_line_number: int = 0
+    body_start_line: int = 0
+    is_override: bool = False
+    # Condition text of the nearest enclosing #if/#ifdef/#elif ("0" for ``#if 0``);
+    # #ifndef is ignored so include guards do not count.
+    preproc_guard: Optional[str] = None
 
     @property
     def qualified_name(self) -> str:
@@ -68,7 +77,12 @@ class FunctionDef:
         dict that maps function identity to a ``FunctionDef``.  Using it instead
         of the bare ``name`` ensures that overloaded functions are distinct nodes.
         """
-        return f"{self.name}({', '.join(self.param_types)})"
+        return make_sig_key(self.name, self.parameters)
+
+
+def make_sig_key(name: str, parameters: List[Parameter]) -> str:
+    """Build the canonical ``name(type, ...)`` key shared by functions and method declarations."""
+    return f"{name}({', '.join(_normalise_type(p.type_) for p in parameters)})"
 
 
 def _normalise_type(raw: str) -> str:
@@ -89,12 +103,45 @@ def _normalise_type(raw: str) -> str:
 
 
 @dataclass
+class FieldDef:
+    name: str
+    type_: str            # as written, e.g. "TemperatureSensor", "Sensor *", "float"
+    line_number: int
+    is_static: bool = False
+
+
+@dataclass
+class MethodDecl:
+    name: str             # short name, e.g. "process", "~Sensor"
+    sig_key: str          # qualified, e.g. "Sensor::process()" (same normalisation as FunctionDef.sig_key)
+    line_number: int
+    is_virtual: bool      # 'virtual' keyword OR override/final specifier
+    is_pure: bool         # declared "= 0"
+    is_override: bool
+    is_final: bool
+    has_body: bool        # defined inline inside the class body
+
+
+@dataclass
+class ClassDef:
+    name: str             # qualified with enclosing namespaces/classes, e.g. "hw::Sensor"
+    file_path: str
+    line_number: int
+    end_line_number: int
+    bases: List[str]      # base names as written minus access/virtual keywords
+    methods: List[MethodDecl] = field(default_factory=list)
+    fields: List[FieldDef] = field(default_factory=list)
+    is_struct: bool = False
+
+
+@dataclass
 class ParseResult:
     file_path: str
     functions: List[FunctionDef]
     classes: List[str]
     includes: List[str]
     raw_source: bytes
+    class_defs: List[ClassDef] = field(default_factory=list)
 
 
 @dataclass

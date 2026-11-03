@@ -99,7 +99,11 @@ class StandardsValidator:
         naming = self._rules.get('naming_conventions', {})
         function_rule = naming.get('function', {}) if isinstance(naming, dict) else {}
         pattern = function_rule.get('regex', r'^[A-Z][a-zA-Z0-9]*$')
-        if not re.match(pattern, fn.name):
+        # fn.name is "Class::method" for methods; the convention applies to the short name.
+        short = fn.name.rsplit('::', 1)[-1]
+        is_special_member = (short.startswith(('~', 'operator'))
+                             or short == (fn.class_name or '').rsplit('::', 1)[-1])
+        if not is_special_member and not re.match(pattern, short):
             convention = function_rule.get('convention', 'PascalCase')
             return [Violation(rule='DO178-NAMING', misra_ref=None, file=fn.file_path, line=fn.line_number,
                               element=fn.name, message=f"'{fn.name}' does not match {convention}", severity='MINOR')]
@@ -157,7 +161,7 @@ class StandardsValidator:
                                  line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"Exception handling in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
-        if fn.name in fn.calls:
+        if fn.sig_key in fn.calls:
             policy = prohibited.get('recursion', 'FORBIDDEN')
             out.append(Violation(rule='DO178-RECURSION', misra_ref=None, file=fn.file_path,
                                  line=fn.line_number, element=fn.name,

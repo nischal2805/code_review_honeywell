@@ -7,6 +7,10 @@ from typing import Optional
 
 from rag_engine.models import ParseResult
 
+# Bump whenever the pickled ParseResult/FunctionDef shape changes: it is part of the stored
+# hash, so entries written by an older shape miss instead of loading without new attributes.
+CACHE_VERSION = 2
+
 
 class AnalysisCache:
     def __init__(self, cache_dir: str = '.rag_cache') -> None:
@@ -35,7 +39,7 @@ class AnalysisCache:
 
     @staticmethod
     def _hash_file(file_path: str) -> str:
-        return hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
+        return f"v{CACHE_VERSION}:{hashlib.sha256(Path(file_path).read_bytes()).hexdigest()}"
 
     def _cache_path(self, file_path: str) -> Path:
         safe = file_path.replace('/', '_').replace('\\', '_').replace(':', '_')

@@ -18,19 +18,19 @@ def test_analyze_returns_result():
 def test_detects_added_virtual():
     result = _analyzer().analyze()
     added = {c.function.name for c in result.changes if c.change_type == 'added'}
-    assert 'brake' in added
+    assert 'Vehicle::brake' in added
 
 
 def test_detects_modified_virtual():
     result = _analyzer().analyze()
     modified = {c.function.name for c in result.changes if c.change_type == 'modified'}
-    assert 'start' in modified
+    assert 'Vehicle::start' in modified
 
 
 def test_unchanged_virtual_present():
     result = _analyzer().analyze()
     unchanged = {c.function.name for c in result.changes if c.change_type == 'unchanged'}
-    assert 'getSpeed' in unchanged
+    assert 'Vehicle::getSpeed' in unchanged
 
 
 def test_added_is_category2():
@@ -43,7 +43,7 @@ def test_added_is_category2():
 def test_modified_param_change_is_category2():
     result = _analyzer().analyze()
     for c in result.changes:
-        if c.change_type == 'modified' and c.function.name == 'start':
+        if c.change_type == 'modified' and c.function.name == 'Vehicle::start':
             assert c.do178c_category == 'Category 2'
 
 
@@ -57,5 +57,5 @@ def test_summary_counts():
 def test_non_virtual_not_in_changes():
     result = _analyzer().analyze()
     names = {c.function.name for c in result.changes}
-    assert 'stop' not in names
+    assert 'Vehicle::stop' not in names
     assert 'utilityFunc' not in names

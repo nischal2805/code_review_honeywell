@@ -19,15 +19,14 @@ def test_analyze_returns_report():
 
 def test_orphan_func_detected():
     report = _detector().analyze()
-    assert 'orphanFunc' in {i.name for i in report.items}
+    assert 'orphanFunc()' in {i.name for i in report.items}
 
 
 def test_orphan_is_dead_code():
     report = _detector().analyze()
     item_map = {i.name: i for i in report.items}
-    if 'orphanFunc' in item_map:
-        assert item_map['orphanFunc'].category == 'dead_code'
-        assert item_map['orphanFunc'].do178c_disposition == 'Remove'
+    assert item_map['orphanFunc()'].category == 'dead_code'
+    assert item_map['orphanFunc()'].do178c_disposition == 'Remove'
 
 
 def test_coverage_impact_populated():
@@ -37,4 +36,4 @@ def test_coverage_impact_populated():
 
 def test_entry_points_not_in_dead():
     report = _detector().analyze()
-    assert 'main' not in {i.name for i in report.items}
+    assert 'main()' not in {i.name for i in report.items}
