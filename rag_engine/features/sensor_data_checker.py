@@ -62,18 +62,41 @@ def check_samples(template: SensorTemplate, samples: List[Sample]) -> List[Sampl
 
 
 def load_samples_csv(path: str | Path) -> Dict[str, List[Sample]]:
-    """Read a `sensor,timestamp_ms,value` CSV into per-sensor sample lists (file order)."""
+    """Read a `sensor,timestamp_ms,value` CSV into per-sensor sample lists (file order).
+
+    Raises ValueError, naming the line, for a missing column, a short or blank row, a non-numeric value or
+    a field the csv module refuses (larger than its 128 KB field limit, NUL bytes)."""
     samples: Dict[str, List[Sample]] = {}
     with Path(path).expanduser().open(newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        if not {'sensor', 'timestamp_ms', 'value'} <= set(reader.fieldnames or []):
-            raise ValueError(f'{path}: CSV header must contain sensor,timestamp_ms,value')
-        for row in reader:
-            try:
-                samples.setdefault(row['sensor'].strip(), []).append(
-                    (float(row['timestamp_ms']), float(row['value'])))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f'{path}:{reader.line_num}: bad sample row {row!r}') from exc
+        try:
+            if not {'sensor', 'timestamp_ms', 'value'} <= set(reader.fieldnames or []):
+                raise ValueError(f'{path}: CSV header must contain sensor,timestamp_ms,value')
+            for row in reader:
+                try:
+                    sensor = row['sensor'].strip()   # None (AttributeError) when the row is shorter than the header
+                    if not sensor:
+                        raise ValueError('empty sensor name')
+                    samples.setdefault(sensor, []).append((float(row['timestamp_ms']), float(row['value'])))
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise ValueError(f'{path}:{reader.line_num}: bad sample row {row!r}') from exc
+        except csv.Error as exc:
+            raise ValueError(f'{path}:{reader.line_num + 1}: {exc}') from exc   # line_num lags: the bad record is the next
+    return samples
+
+
+def parse_inline_samples(text: str) -> List[Sample]:
+    """'t:v, t:v, ...' (t in ms) -> [(t, v)]. Raises ValueError on a missing colon, a non-number or no samples."""
+    samples: List[Sample] = []
+    for item in text.split(','):
+        if not item.strip():
+            continue
+        t, sep, v = item.partition(':')
+        if not sep:
+            raise ValueError(f"bad sample {item.strip()!r}: expected 't:v'")
+        samples.append((float(t), float(v)))
+    if not samples:
+        raise ValueError('no samples')
     return samples
 
 
