@@ -24,6 +24,7 @@ class Config:
     param_count_max: int = 7
     faiss_similarity_threshold: float = 0.6
     standards_file: str = ''
+    sensor_templates_file: str = ''
     standards_profile: Dict[str, Any] = field(default_factory=dict)
     lru_names: List[str] = field(default_factory=lambda: [
         'ADS', 'AGMCAL', 'AGM', 'APM', 'BCU', 'CLOCK',
@@ -38,11 +39,12 @@ def load_config(path: str = 'config.yaml') -> Config:
             data = yaml.safe_load(f) or {}
         valid = {k: v for k, v in data.items() if hasattr(Config, k) and k != 'standards_profile'}
         cfg = Config(**valid)
-        if cfg.standards_file:
-            standards_path = Path(cfg.standards_file)
-            if not standards_path.is_absolute():
-                standards_path = (config_path.parent / standards_path).resolve()
-            cfg.standards_file = str(standards_path)
+        for attr in ('standards_file', 'sensor_templates_file'):
+            if getattr(cfg, attr):
+                file_path = Path(getattr(cfg, attr))
+                if not file_path.is_absolute():
+                    file_path = (config_path.parent / file_path).resolve()
+                setattr(cfg, attr, str(file_path))
         cfg.standards_profile = extract_standards_profile_sections(data)
         return cfg
     except FileNotFoundError:

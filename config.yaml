@@ -21,3 +21,4 @@ function_length_max: 50
 nesting_depth_max: 5
 param_count_max: 7
 faiss_similarity_threshold: 0.6
+sensor_templates_file: ''
