@@ -34,8 +34,12 @@ def test_goto_flagged(tmp_path):
     cpp = tmp_path / 'bad.cpp'
     cpp.write_text('void badFunc() {\n    goto end;\n    end: return;\n}\n')
     v = StandardsValidator(Config(), CodeParser().parse_directory(str(tmp_path)))
-    rules = {x.rule for x in v.analyze().violations}
+    violations = v.analyze().violations
+    rules = {x.rule for x in violations}
     assert 'DO178-GOTO' in rules
+    goto = next(x for x in violations if x.rule == 'DO178-GOTO')
+    assert goto.function_line == 1
+    assert goto.line == 2
 
 
 def test_dynamic_memory_flagged(tmp_path):

@@ -1,6 +1,7 @@
 # DO-178C Code Standards Compliance Report — §5.1
 Generated: {{ report_date }}
 DAL Level: {{ dal_level }}
+Coding Standards Source: {{ standards_source }}
 Compliance Score: {{ compliance_score }}%
 
 ## Violations by Severity
@@ -20,10 +21,9 @@ Compliance Score: {{ compliance_score }}%
 
 ## Violations
 
+| Severity | Rule | File | Function start line | Violation line | Element | Message |
+|----------|------|------|---------------------|----------------|---------|---------|
 {% for v in violations %}
-**{{ v.rule }}** ({{ v.severity }})
-{% if v.misra_ref %}- MISRA: {{ v.misra_ref }}{% endif %}
-- {{ v.file }}:{{ v.line }} — `{{ v.element }}`
-- {{ v.message }}
+| {{ v.severity }} | {{ v.rule }} | {{ v.file }} | {{ v.function_line or 'N/A' }} | {{ v.line }} | `{{ v.element }}` | {{ v.message }}{% if v.misra_ref %} (MISRA: {{ v.misra_ref }}){% endif %} |
 
 {% endfor %}

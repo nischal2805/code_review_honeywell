@@ -21,6 +21,8 @@ class ComplianceReport:
     total_functions_checked: int
     violations_by_severity: Dict[str, int]
     corrections: Dict[str, str]
+    standards_source: str = 'built-in defaults'
+    active_rules: Dict[str, Any] | None = None
 
 
 _FIXES = {
@@ -65,7 +67,9 @@ class StandardsValidator:
         logger.info(f"Standards: {len(violations)} violations, score {score:.1f}%")
         return ComplianceReport(violations=violations, compliance_score=score,
                                 total_functions_checked=total, violations_by_severity=by_sev,
-                                corrections=corrections)
+                                corrections=corrections,
+                                standards_source=self._cfg.standards_file or 'built-in defaults',
+                                active_rules=self._rules)
 
     def _load_rules(self) -> Dict[str, Any]:
         profile = copy.deepcopy(self._cfg.standards_profile)
@@ -95,6 +99,14 @@ class StandardsValidator:
             return 'MINOR'
         return default
 
+    @staticmethod
+    def _body_line(fn: FunctionDef, pattern: str) -> int:
+        """Return the source line of the first matching construct in a function."""
+        match = re.search(pattern, fn.body)
+        if not match:
+            return fn.line_number
+        return fn.line_number + fn.body[:match.start()].count('\n')
+
     def _check_naming(self, fn: FunctionDef) -> List[Violation]:
         naming = self._rules.get('naming_conventions', {})
         function_rule = naming.get('function', {}) if isinstance(naming, dict) else {}
@@ -106,6 +118,7 @@ class StandardsValidator:
         if not is_special_member and not re.match(pattern, short):
             convention = function_rule.get('convention', 'PascalCase')
             return [Violation(rule='DO178-NAMING', misra_ref=None, file=fn.file_path, line=fn.line_number,
+                              function_line=fn.line_number,
                               element=fn.name, message=f"'{fn.name}' does not match {convention}", severity='MINOR')]
         return []
 
@@ -120,18 +133,22 @@ class StandardsValidator:
         out = []
         if fn.cyclomatic_complexity > max_cc:
             out.append(Violation(rule='DO178-CC', misra_ref=None, file=fn.file_path, line=fn.line_number,
+                                 function_line=fn.line_number,
                                  element=fn.name, severity='MEDIUM',
                                  message=f"CC={fn.cyclomatic_complexity} > limit {max_cc}"))
         if fn.line_count > max_len:
             out.append(Violation(rule='DO178-FUNC-LEN', misra_ref=None, file=fn.file_path, line=fn.line_number,
+                                 function_line=fn.line_number,
                                  element=fn.name, severity='MINOR',
                                  message=f"Length={fn.line_count} > limit {max_len}"))
         if fn.nesting_depth > max_nesting:
             out.append(Violation(rule='DO178-NESTING', misra_ref=None, file=fn.file_path, line=fn.line_number,
+                                 function_line=fn.line_number,
                                  element=fn.name, severity='MINOR',
                                  message=f"Nesting={fn.nesting_depth} > limit {max_nesting}"))
         if len(fn.parameters) > max_params:
             out.append(Violation(rule='DO178-PARAM-COUNT', misra_ref=None, file=fn.file_path, line=fn.line_number,
+                                 function_line=fn.line_number,
                                  element=fn.name, severity='MINOR',
                                  message=f"Params={len(fn.parameters)} > limit {max_params}"))
         return out
@@ -146,31 +163,31 @@ class StandardsValidator:
         if re.search(r'\bgoto\b', body):
             policy = universal.get('prohibited_constructs', {}).get('goto', 'FORBIDDEN') if isinstance(universal, dict) else 'FORBIDDEN'
             out.append(Violation(rule='DO178-GOTO', misra_ref='MISRA-C++:6-6-1', file=fn.file_path,
-                                 line=fn.line_number, element=fn.name,
+                                 line=self._body_line(fn, r'\bgoto\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'CRITICAL'),
                                  message=f"'goto' in '{fn.name}' — prohibited by DO-178C"))
         if re.search(r'\b(?:new|delete)\b', body) or re.search(r'\b(?:malloc|calloc|realloc|free)\s*\(', body):
             policy = prohibited.get('dynamic_memory', 'FORBIDDEN')
             out.append(Violation(rule='DO178-DYNAMIC-MEM', misra_ref=None, file=fn.file_path,
-                                 line=fn.line_number, element=fn.name,
+                                 line=self._body_line(fn, r'\b(?:new|delete|malloc|calloc|realloc|free)\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'CRITICAL'),
                                  message=f"Dynamic memory in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if re.search(r'\b(?:try|catch)\b', body):
             policy = prohibited.get('exceptions', 'FORBIDDEN')
             out.append(Violation(rule='DO178-EXCEPTION', misra_ref='MISRA-C++:15-0-1', file=fn.file_path,
-                                 line=fn.line_number, element=fn.name,
+                                 line=self._body_line(fn, r'\b(?:try|catch)\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"Exception handling in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if fn.sig_key in fn.calls:
             policy = prohibited.get('recursion', 'FORBIDDEN')
             out.append(Violation(rule='DO178-RECURSION', misra_ref=None, file=fn.file_path,
-                                 line=fn.line_number, element=fn.name,
+                                 line=self._body_line(fn, rf'\b{re.escape(fn.name)}\s*\('), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"Recursive call in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if re.search(r'\b(?:dynamic_cast|typeid)\b', body):
             policy = prohibited.get('rtti', 'FORBIDDEN')
             out.append(Violation(rule='DO178-RTTI', misra_ref='MISRA-C++:5-2-2', file=fn.file_path,
-                                 line=fn.line_number, element=fn.name,
+                                 line=self._body_line(fn, r'\b(?:dynamic_cast|typeid)\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"RTTI in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         return out
@@ -180,7 +197,7 @@ class StandardsValidator:
             doc_rule = self._rules.get('universal_standards', {}).get('documentation', {})
             policy = doc_rule.get('missing_docstring', 'MINOR') if isinstance(doc_rule, dict) else 'MINOR'
             return [Violation(rule='DO178-NO-DOCSTRING', misra_ref=None, file=fn.file_path,
-                              line=fn.line_number, element=fn.name,
+                              line=fn.line_number, function_line=fn.line_number, element=fn.name,
                               severity=self._policy_to_violation_severity(policy, 'MINOR'),
                               message=f"'{fn.name}' has no documentation comment")]
         return []
@@ -193,7 +210,9 @@ class StandardsValidator:
             return out
         for m in re.finditer(r'\bwhile\s*\(\s*true\s*\)|\bfor\s*\(\s*;;\s*\)', src):
             line_no = src[:m.start()].count('\n') + 1
+            function_line = next((fn.line_number for fn in result.functions
+                                  if fn.line_number <= line_no), None)
             out.append(Violation(rule='DO178-UNBOUNDED-LOOP', misra_ref=None, file=result.file_path,
-                                 line=line_no, element='loop', severity='MAJOR',
+                                 line=line_no, function_line=function_line, element='loop', severity='MAJOR',
                                  message='Unbounded loop — exit condition must be proven'))
         return out

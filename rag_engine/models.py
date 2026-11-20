@@ -218,6 +218,7 @@ class Violation:
     message: str
     severity: Literal['MINOR', 'MEDIUM', 'MAJOR', 'CRITICAL']
     disposition: Optional[str] = None
+    function_line: Optional[int] = None
 
 
 @dataclass

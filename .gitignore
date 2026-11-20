@@ -6,3 +6,4 @@ docs/
 output/
 input/
 .vscode/settings.json
+venv312/

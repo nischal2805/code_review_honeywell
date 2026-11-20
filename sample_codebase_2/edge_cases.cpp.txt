@@ -1,0 +1,408 @@
+#include "edge_cases.h"
+
+#include <iostream>
+#include <string>
+
+
+// ============================================================
+// 1. NORMAL GLOBAL FUNCTIONS
+// ============================================================
+
+void normalReachable()
+{
+    std::cout << "normal reachable\n";
+}
+
+void normalDead()
+{
+    std::cout << "normal dead\n";
+}
+
+
+// ============================================================
+// 2. FUNCTION -> FUNCTION -> FUNCTION
+// ============================================================
+
+void level3()
+{
+    std::cout << "level 3\n";
+}
+
+void level2()
+{
+    level3();
+}
+
+void level1()
+{
+    level2();
+}
+
+
+// Dead chain:
+// deadChainStart -> deadChainMiddle -> deadChainEnd
+
+void deadChainEnd()
+{
+    std::cout << "dead chain end\n";
+}
+
+void deadChainMiddle()
+{
+    deadChainEnd();
+}
+
+void deadChainStart()
+{
+    deadChainMiddle();
+}
+
+
+// ============================================================
+// 3. INDIRECTLY REACHABLE
+// ============================================================
+
+void indirectlyReachable()
+{
+    std::cout << "I am not called directly by main\n";
+}
+
+void callerOfIndirect()
+{
+    indirectlyReachable();
+}
+
+
+// ============================================================
+// 4. FUNCTION OVERLOADING
+// ============================================================
+
+void overload()
+{
+    std::cout << "overload()\n";
+}
+
+void overload(int x)
+{
+    std::cout << "overload(int)\n";
+}
+
+void overload(double x)
+{
+    std::cout << "overload(double)\n";
+}
+
+void overload(const std::string& text)
+{
+    std::cout << "overload(string)\n";
+}
+
+
+// ============================================================
+// 5. SAME NAME, DIFFERENT CLASSES
+// ============================================================
+
+void ClassA::process()
+{
+    std::cout << "Class A\n";
+}
+
+void ClassB::process()
+{
+    std::cout << "Class B\n";
+}
+
+
+// ============================================================
+// 6. INHERITANCE / OVERRIDING
+// ============================================================
+
+void Base::run()
+{
+    std::cout << "Base run\n";
+}
+
+void Base::reset()
+{
+    std::cout << "Base reset\n";
+}
+
+void Derived::run()
+{
+    std::cout << "Derived run\n";
+}
+
+void Derived::reset()
+{
+    std::cout << "Derived reset\n";
+}
+
+
+// ============================================================
+// 7. ANOTHER DERIVED CLASS
+// ============================================================
+
+void AnotherDerived::run()
+{
+    std::cout << "Another derived run\n";
+}
+
+
+// ============================================================
+// 8. MEMBER FUNCTIONS
+// ============================================================
+
+void Worker::work()
+{
+    std::cout << "Worker work\n";
+}
+
+void Worker::unusedWork()
+{
+    std::cout << "Worker unused work\n";
+}
+
+
+// ============================================================
+// 9. POINTER / REFERENCE
+// ============================================================
+
+void pointerCaller(Worker* worker)
+{
+    if (worker != nullptr)
+    {
+        worker->work();
+    }
+}
+
+void referenceCaller(Worker& worker)
+{
+    worker.work();
+}
+
+
+// ============================================================
+// 10. CALLBACK / FUNCTION POINTER
+// ============================================================
+
+void callbackTarget()
+{
+    std::cout << "callback target\n";
+}
+
+void unusedCallbackTarget()
+{
+    std::cout << "unused callback target\n";
+}
+
+void registerCallback(void (*callback)())
+{
+    callback();
+}
+
+
+// ============================================================
+// 11. LAMBDA
+// ============================================================
+
+void lambdaTarget()
+{
+    std::cout << "lambda target\n";
+}
+
+void lambdaCaller()
+{
+    auto task = []()
+    {
+        lambdaTarget();
+    };
+
+    task();
+}
+
+
+// ============================================================
+// 12. RECURSION
+// ============================================================
+
+void recursiveFunction(int n)
+{
+    if (n <= 0)
+        return;
+
+    recursiveFunction(n - 1);
+}
+
+void unusedRecursiveFunction(int n)
+{
+    if (n <= 0)
+        return;
+
+    unusedRecursiveFunction(n - 1);
+}
+
+
+// ============================================================
+// 13. CONSTRUCTOR
+// ============================================================
+
+Object::Object()
+{
+    std::cout << "Object constructed\n";
+}
+
+void Object::use()
+{
+    std::cout << "Object used\n";
+}
+
+void Object::unusedMethod()
+{
+    std::cout << "Unused object method\n";
+}
+
+
+// ============================================================
+// 14. COMPLETELY DEAD
+// ============================================================
+
+void completelyDead1()
+{
+    std::cout << "dead 1\n";
+}
+
+void completelyDead2()
+{
+    std::cout << "dead 2\n";
+}
+
+
+// ============================================================
+// MAIN
+// ============================================================
+
+int main()
+{
+    // --------------------------------------------------------
+    // NORMAL
+    // --------------------------------------------------------
+
+    normalReachable();
+
+
+    // --------------------------------------------------------
+    // INDIRECT CHAIN
+    // main -> level1 -> level2 -> level3
+    // --------------------------------------------------------
+
+    level1();
+
+
+    // --------------------------------------------------------
+    // INDIRECT REACHABILITY
+    // main -> callerOfIndirect -> indirectlyReachable
+    // --------------------------------------------------------
+
+    callerOfIndirect();
+
+
+    // --------------------------------------------------------
+    // OVERLOADING
+    // --------------------------------------------------------
+
+    overload();
+    overload(10);
+    overload(10.5);
+    // overload(std::string("hello"));   // intentionally unused
+
+
+    // --------------------------------------------------------
+    // SAME NAME / DIFFERENT CLASS
+    // --------------------------------------------------------
+
+    ClassA a;
+    a.process();
+
+    // ClassB::process() intentionally never called
+
+
+    // --------------------------------------------------------
+    // INHERITANCE / OVERRIDING
+    // --------------------------------------------------------
+
+    Derived derived;
+
+    derived.run();
+    derived.reset();
+
+
+    // --------------------------------------------------------
+    // BASE CLASS
+    // --------------------------------------------------------
+
+    Base base;
+
+    base.run();
+
+
+    // --------------------------------------------------------
+    // ANOTHER DERIVED CLASS
+    // AnotherDerived::run() is never called
+    // --------------------------------------------------------
+
+
+    // --------------------------------------------------------
+    // MEMBER FUNCTION
+    // --------------------------------------------------------
+
+    Worker worker;
+
+    worker.work();
+
+
+    // --------------------------------------------------------
+    // POINTER
+    // --------------------------------------------------------
+
+    pointerCaller(&worker);
+
+
+    // --------------------------------------------------------
+    // REFERENCE
+    // --------------------------------------------------------
+
+    referenceCaller(worker);
+
+
+    // --------------------------------------------------------
+    // CALLBACK
+    // --------------------------------------------------------
+
+    registerCallback(callbackTarget);
+
+
+    // --------------------------------------------------------
+    // LAMBDA
+    // --------------------------------------------------------
+
+    lambdaCaller();
+
+
+    // --------------------------------------------------------
+    // RECURSION
+    // --------------------------------------------------------
+
+    recursiveFunction(3);
+
+
+    // --------------------------------------------------------
+    // CONSTRUCTOR
+    // --------------------------------------------------------
+
+    Object object;
+
+    object.use();
+
+
+    return 0;
+}
