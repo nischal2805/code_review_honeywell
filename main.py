@@ -63,6 +63,9 @@ def analyze(
     base_build: Optional[str] = typer.Option(None, help='Base build dir for virtual analysis diff'),
     lru_docs: Optional[str] = typer.Option(None, help='Dir with LRU PDF/DOCX documents'),
     standards_file: Optional[str] = typer.Option(None, help='Path to custom DAL standards YAML/JSON/PDF/DOCX file'),
+    coding_standards_pdf: Optional[str] = typer.Option(
+        None, '--coding-standards-pdf', help='Uploaded coding-standards PDF used directly for validation'
+    ),
     sensor_templates: Optional[str] = _TEMPLATES,
     config: str = _CONFIG,
     output_format: str = typer.Option('docx', help='Output format: docx or markdown'),
@@ -72,10 +75,16 @@ def analyze(
     """Run all DO-178C analyses and generate §11-compliant reports."""
     cfg = _load(config, sensor_templates)
     logger.info(f"RAG Engine — DAL {cfg.dal_level}, output: {cfg.output_dir}")
-    if standards_file:
-        if not Path(standards_file).expanduser().exists():
-            raise _fail(f"Standards file not found: {standards_file}")
-        cfg.standards_file = standards_file
+    selected_standards = coding_standards_pdf or standards_file
+    if coding_standards_pdf and standards_file:
+        typer.echo('Use either --coding-standards-pdf or --standards-file, not both', err=True)
+        raise typer.Exit(1)
+    if selected_standards:
+        selected_path = Path(selected_standards).expanduser()
+        if not selected_path.exists():
+            typer.echo(f"Standards file not found: {selected_standards}", err=True)
+            raise typer.Exit(1)
+        cfg.standards_file = str(selected_path)
 
     with tqdm(total=100, desc='Analysis') as bar:
         def progress(step: str, pct: int) -> None:
@@ -93,6 +102,41 @@ def analyze(
     if critical > 0:
         typer.echo(f"\nWARNING: {critical} CRITICAL violation(s)", err=True)
         raise typer.Exit(1)
+
+
+@app.command()
+def validate_config(
+    config: str = _CONFIG,
+    standards_file: Optional[str] = typer.Option(None, '--standards-file',
+                                                    help='Path to custom DAL standards YAML/JSON/PDF/DOCX/TXT file'),
+    coding_standards_pdf: Optional[str] = typer.Option(
+        None, '--coding-standards-pdf', help='Read and validate an uploaded coding-standards PDF'
+    ),
+) -> None:
+    """Validate configuration file."""
+    cfg = _load(config)
+    selected_standards = coding_standards_pdf or standards_file
+    if coding_standards_pdf and standards_file:
+        raise _fail('Use either --coding-standards-pdf or --standards-file, not both')
+    if selected_standards:
+        standards_path = Path(selected_standards).expanduser()
+        if not standards_path.exists():
+            raise _fail(f"Standards file not found: {selected_standards}")
+        cfg.standards_file = str(standards_path)
+    if coding_standards_pdf:
+        standards_path = Path(coding_standards_pdf).expanduser()
+        if standards_path.suffix.lower() != '.pdf':
+            raise _fail('The --coding-standards-pdf option requires a .pdf file')
+        from rag_engine.knowledge_base.standards_profile import load_raw_standards_profile
+        profile = load_raw_standards_profile(standards_path)
+        typer.echo(
+            'Coding standards PDF OK — '
+            f"A CC limit {profile['dal_specific_standards']['A']['complexity']['cyclomatic_complexity_max']}, "
+            f"B CC limit {profile['dal_specific_standards']['B']['complexity']['cyclomatic_complexity_max']}, "
+            f"C CC limit {profile['dal_specific_standards']['C']['complexity']['cyclomatic_complexity_max']}"
+        )
+    else:
+        typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
 
 
 @app.command()
@@ -207,16 +251,6 @@ def ask(
     llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
     narrator = RAGNarrativeGenerator(llm, None) if cfg.ollama_enabled and llm.is_available() else None
     typer.echo(answer_question(question, results, narrator))
-
-
-@app.command()
-def validate_config(config: str = typer.Option('config.yaml')) -> None:
-    """Validate configuration file."""
-    try:
-        cfg = load_config(config)
-    except ValueError as exc:
-        raise _fail(f"Error: {exc}")
-    typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
 
 if __name__ == '__main__':
     # Piped output on Windows defaults to cp1252, which cannot print the inheritance-tree characters.

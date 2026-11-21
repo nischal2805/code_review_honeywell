@@ -73,9 +73,17 @@ python main.py analyze /path/to/current_build \
 | `--lru-docs` | none | Directory containing LRU PDF/DOCX specification documents |
 | `--config` | `config.yaml` | Path to configuration file |
 | `--standards-file` | none | Optional custom standards file (`.yaml`, `.json`, `.pdf`, `.docx`, `.txt`) |
+| `--coding-standards-pdf` | none | Uploaded coding-standards PDF used directly by CLI validation |
 | `--output-format` | `docx` | Output format: `docx` or `markdown` |
 | `--sensor-templates PATH` (alias `--templates`) | `sensor_templates_file` | Sensor template YAML; enables the sensor report |
 | `--semantic-search` / `--no-semantic-search` | on | Use the embedding model for coupling analysis (keyword matching without it) |
+
+Validate an uploaded PDF before analysis:
+
+```powershell
+python main.py validate-config --coding-standards-pdf samples/coding_standards_strict.pdf
+python main.py analyze sample_codebase --coding-standards-pdf samples/coding_standards_strict.pdf --output-format markdown
+```
 
 ### Output
 

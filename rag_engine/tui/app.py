@@ -91,7 +91,7 @@ class ConfigScreen(Screen):
             yield Static("LRU documents directory (optional)")
             yield Input(placeholder="/path/to/lru_docs", id="lru-docs")
             yield Static("Standards profile file (optional, YAML/JSON/PDF/DOCX/TXT)")
-            yield Input(placeholder="/path/to/standards.yaml", id="standards-file")
+            yield Input(placeholder="/path/to/coding_standards.pdf", id="standards-file")
             yield Static("Sensor templates file (optional — default: sensor_templates_file in config.yaml)")
             yield Input(placeholder="/path/to/sensor_templates.yaml", id="sensor-templates")
             yield Checkbox("Use semantic search (needs sentence-transformers)", value=True, id="semantic-search")
@@ -516,13 +516,14 @@ class ResultsScreen(Screen):
 
     def _build_standards_table(self) -> DataTable:
         t = DataTable(id="dt-standards", zebra_stripes=True)
-        t.add_columns("Severity", "Rule", "File", "Line", "Element", "Message")
+        t.add_columns("Severity", "Rule", "File", "Function line", "Violation line", "Element", "Message")
         if self._results.standards:
             for v in self._results.standards.violations:  # type: ignore[union-attr]
                 sev_color = {"CRITICAL": "red", "MAJOR": "yellow", "MEDIUM": "cyan", "MINOR": "white"}.get(v.severity, "white")
                 t.add_row(
                     _t(v.severity, sev_color),
-                    _t(v.rule), _t(Path(v.file).name), _t(v.line), _t(v.element),
+                    _t(v.rule), _t(Path(v.file).name), _t(v.function_line or "N/A"),
+                    _t(v.line), _t(v.element),
                     _t(v.message[:60] + ("…" if len(v.message) > 60 else "")),
                 )
         return t

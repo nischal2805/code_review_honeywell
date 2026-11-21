@@ -107,6 +107,7 @@ class ReportGenerator:
         md = render('standards_report.jinja2', {
             'report_date': date.today().isoformat(),
             'dal_level': self._cfg.dal_level,
+            'standards_source': result.standards_source,
             'violations': result.violations,
             'compliance_score': round(result.compliance_score, 1),
             'llm_narrative': llm_narrative,

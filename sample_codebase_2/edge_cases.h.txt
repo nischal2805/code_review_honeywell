@@ -1,0 +1,159 @@
+#ifndef EDGE_CASES_H
+#define EDGE_CASES_H
+
+#include <string>
+
+// ============================================================
+// 1. NORMAL GLOBAL FUNCTIONS
+// ============================================================
+
+void normalReachable();
+void normalDead();
+
+
+// ============================================================
+// 2. FUNCTION -> FUNCTION -> FUNCTION
+// ============================================================
+
+void level1();
+void level2();
+void level3();
+
+void deadChainStart();
+void deadChainMiddle();
+void deadChainEnd();
+
+
+// ============================================================
+// 3. FUNCTION NOT CALLED DIRECTLY FROM main()
+//    BUT REACHABLE THROUGH ANOTHER FUNCTION
+// ============================================================
+
+void indirectlyReachable();
+void callerOfIndirect();
+
+
+// ============================================================
+// 4. FUNCTION OVERLOADING
+// ============================================================
+
+void overload();
+void overload(int);
+void overload(double);
+void overload(const std::string&);
+
+
+// ============================================================
+// 5. SAME NAME, DIFFERENT CLASSES
+// ============================================================
+
+class ClassA
+{
+public:
+    void process();
+};
+
+class ClassB
+{
+public:
+    void process();
+};
+
+
+// ============================================================
+// 6. INHERITANCE / OVERRIDING
+// ============================================================
+
+class Base
+{
+public:
+    virtual void run();
+    virtual void reset();
+};
+
+class Derived : public Base
+{
+public:
+    void run() override;
+    void reset() override;
+};
+
+
+// ============================================================
+// 7. ANOTHER DERIVED CLASS
+// ============================================================
+
+class AnotherDerived : public Base
+{
+public:
+    void run() override;
+};
+
+
+// ============================================================
+// 8. MEMBER FUNCTIONS
+// ============================================================
+
+class Worker
+{
+public:
+    void work();
+    void unusedWork();
+};
+
+
+// ============================================================
+// 9. POINTER / REFERENCE
+// ============================================================
+
+void pointerCaller(Worker* worker);
+void referenceCaller(Worker& worker);
+
+
+// ============================================================
+// 10. FUNCTION POINTER / CALLBACK
+// ============================================================
+
+void callbackTarget();
+void unusedCallbackTarget();
+
+void registerCallback(void (*callback)());
+
+
+// ============================================================
+// 11. LAMBDA
+// ============================================================
+
+void lambdaCaller();
+void lambdaTarget();
+
+
+// ============================================================
+// 12. RECURSION
+// ============================================================
+
+void recursiveFunction(int n);
+void unusedRecursiveFunction(int n);
+
+
+// ============================================================
+// 13. CONSTRUCTOR
+// ============================================================
+
+class Object
+{
+public:
+    Object();
+    void use();
+    void unusedMethod();
+};
+
+
+// ============================================================
+// 14. COMPLETELY DEAD FUNCTIONS
+// ============================================================
+
+void completelyDead1();
+void completelyDead2();
+
+#endif
