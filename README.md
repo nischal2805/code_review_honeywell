@@ -85,6 +85,15 @@ python main.py validate-config --coding-standards-pdf samples/coding_standards_s
 python main.py analyze sample_codebase --coding-standards-pdf samples/coding_standards_strict.pdf --output-format markdown
 ```
 
+### Web UI (Streamlit)
+
+```bash
+pip install -r requirements.txt
+python run_ui.py
+```
+
+One interface for configuration (incl. sensor YAML upload), analysis execution, every analysis module, the AI assistant and reports. It calls `run_pipeline` and `answer_question`; no analysis logic lives in `ui/`.
+
 ### Output
 
 All reports written to `output/` (configurable in `config.yaml`):

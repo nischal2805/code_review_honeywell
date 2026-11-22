@@ -7,3 +7,4 @@ output/
 input/
 .vscode/settings.json
 venv312/
+.ui_workspace/
