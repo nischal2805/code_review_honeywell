@@ -190,7 +190,10 @@ def configuration() -> None:
     c.section('Sensor configuration (YAML)')
     _upload('Upload a sensor YAML', ['yaml', 'yml'], 'up_sensor', 'sensor_path')
     _path_input('Sensor templates file path', 'sensor_path', 'Enables the sensor analysis stage of the main run.')
-    _sensor_yaml_view(k['sensor_path'])
+    fallback = '' if k['sensor_path'] else _from_config_yaml('sensor_templates_file')
+    if fallback:
+        st.caption(f'Using `sensor_templates_file` from the config file: `{fallback}`')
+    _sensor_yaml_view(k['sensor_path'] or fallback)
 
     c.section('Validate configuration')
     if st.button('Validate configuration', type='primary'):
@@ -201,6 +204,14 @@ def configuration() -> None:
             st.error(str(exc))
         if not k['codebase'] or not Path(k['codebase']).expanduser().is_dir():
             st.warning('The C++ source directory is missing or not a directory.')
+
+
+def _from_config_yaml(attr: str) -> str:
+    """*attr* as the selected config file sets it ('' when unset or the file is invalid)."""
+    try:
+        return getattr(load_config(conf()['config_path'] or 'config.yaml'), attr) or ''
+    except ValueError:
+        return ''
 
 
 def _sensor_yaml_view(path: str) -> None:
@@ -248,10 +259,9 @@ def execution() -> None:
             st.rerun()
     if not codebase_ok:
         cols[1].warning('Set a valid C++ source directory under Project Configuration first.')
-    _progress()
+    st.fragment(_progress, run_every=1.0 if rs.status == 'running' else None)()
 
 
-@st.fragment(run_every=1.0)
 def _progress() -> None:
     rs = run_state()
     if rs.status == 'idle':
@@ -363,7 +373,7 @@ def dead_code() -> None:
 
 def _disposition_panel(d) -> None:
     c.section('Disposition review')
-    open_items = [i for i in d.items]
+    open_items = d.items
     if not open_items:
         st.caption('No findings to review.')
         return
@@ -509,7 +519,9 @@ def sensors() -> None:
         if not found:
             st.caption('No sensor was mapped to a class, so there is no data flow to show.')
     with t_cfg:
-        _sensor_yaml_view(conf()['sensor_path'] or (run_state().cfg.sensor_templates_file if run_state().cfg else ''))
+        used = run_state().cfg.sensor_templates_file if run_state().cfg else ''
+        st.caption(f'Configuration used by the last run: `{used}`')
+        _sensor_yaml_view(used)
 
 
 def _sensor_row(f) -> Dict[str, Any]:

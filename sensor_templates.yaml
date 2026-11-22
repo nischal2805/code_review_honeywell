@@ -15,6 +15,10 @@
 #   debounce              {enabled, threshold, count}  jumps larger than threshold are flagged
 #                         until `count` consecutive samples confirm the new value (count >= 1)
 #   corrupt               {range_check}  enable/disable the valid_range check
+# Adding a sensor needs only an entry here. Its checks are found in the code whether they are written
+# inline (`v > TEMP_MAX`) or through shared validators written once for all sensors
+# (`inRange(raw, AIRSPEED_MIN, AIRSPEED_MAX)`): the constants passed at the call site are compared with
+# this sensor's valid_range / stale / debounce values.
 # `defaults:` is deep-merged into every sensor; sensor keys win. A single sensor may instead be
 # given as a top-level `sensor:` mapping.
 defaults:

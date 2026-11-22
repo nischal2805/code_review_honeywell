@@ -76,6 +76,15 @@ class _Comparison:
     in_for_condition: bool
 
 
+@dataclass(frozen=True)
+class _ParamComparison:
+    """A relational comparison in a function body that involves the function's parameters, e.g.
+    ``v >= lo`` in ``inRange(float v, float lo, float hi)``: its constants come from each call site."""
+    kind: Literal['range', 'stale', 'debounce']
+    text: str
+    sides: Tuple[FrozenSet[str], FrozenSet[str]]   # parameter names on the left and right operand
+
+
 @dataclass
 class _Facts:
     comparisons: List[_Comparison]
@@ -220,6 +229,7 @@ class SensorAnalyzer:
         self._methods: Dict[str, List[MethodInfo]] = {}      # class -> its methods
         self._consts: Dict[str, float] = {}
         self._facts: Dict[str, _Facts] = {}                  # sig_key -> comparisons etc., filled lazily
+        self._param_cmps: Dict[str, List[_ParamComparison]] = {}   # sig_key -> parametric comparisons, lazily
         self._families: List[Set[str]] = []                  # of the matched sensors
         self._sites: Dict[str, Dict[Tuple[int, Optional[str]], Set[str]]] = {}   # caller -> (line, receiver) -> targets
 
@@ -453,6 +463,7 @@ class SensorAnalyzer:
                 calls=frozenset(c for s in variable for c in _calls_in(s, src, first_line)),
                 in_for_condition=_in_for_condition(node)))
 
+        found += self._generic_validator_calls(fn, tree.root_node, src, first_line)
         assigned: Dict[str, Set[_Call]] = {}
 
         def record(name: str, value: Optional[Node]) -> None:
@@ -470,6 +481,75 @@ class SensorAnalyzer:
                 field_node = left.child_by_field_name('field') if left.type == 'field_expression' else left
                 record(get_text(field_node, src) if field_node is not None else '', node.child_by_field_name('right'))
         return _Facts(list(dict.fromkeys(found)), assigned)
+
+    # ── Generic validators: one function, constants supplied per sensor at the call site ──
+
+    def _parametric_comparisons(self, sig_key: str) -> List[_ParamComparison]:
+        """Comparisons in *sig_key*'s body with a parameter as an operand; the function name decides the
+        kind when it says one (``isStale`` -> stale), otherwise the comparison's own wording does."""
+        if sig_key in self._param_cmps:
+            return self._param_cmps[sig_key]
+        fn = self._funcs[sig_key]
+        params = {p.name for p in fn.parameters if p.name}
+        out: List[_ParamComparison] = []
+        if params and fn.body:
+            src = b'void __f()' + fn.body.encode('utf-8')
+            name_tokens = _tokens(fn.name.rsplit('::', 1)[-1])
+            named = ('stale' if name_tokens & _STALE_TOKENS else
+                     'debounce' if name_tokens & _DEBOUNCE_TOKENS else None)
+            for node in find_nodes(self._parser.parse(src).root_node, 'binary_expression'):
+                operator = node.child_by_field_name('operator')
+                if operator is None or get_text(operator, src) not in _RELATIONAL:
+                    continue
+                sides = tuple(frozenset(_identifiers(n, src)) & params if n is not None else frozenset()
+                              for n in (node.child_by_field_name('left'), node.child_by_field_name('right')))
+                if sides[0] or sides[1]:
+                    out.append(_ParamComparison(named or _classify(node, src),
+                                                ' '.join(get_text(node, src).split()), sides))   # type: ignore[arg-type]
+        self._param_cmps[sig_key] = out
+        return out
+
+    def _generic_validator_calls(self, fn: FunctionDef, root: Node, src: bytes, first_line: int) -> List[_Comparison]:
+        """Calls in *fn* to a function that compares its parameters, with a constant argument bound to one of
+        them: ``inRange(raw, AIRSPEED_MIN, AIRSPEED_MAX)`` is the comparisons ``raw >= 0`` and ``raw <= 450``
+        at the call site.  One validator written once then serves every sensor that passes its own limits."""
+        # shortcut: one call level; a validator that forwards its limits to another validator is not followed.
+        sites = self._sites.get(fn.sig_key, {})
+        out: List[_Comparison] = []
+        for call in find_nodes(root, 'call_expression'):
+            key = _call_of(call, src, first_line)
+            args_node = call.child_by_field_name('arguments')
+            if key is None or args_node is None:
+                continue
+            name, line, receiver = key
+            targets = [t for t in sorted(sites.get((line, receiver), ())) if t in self._funcs
+                       and self._funcs[t].name.rsplit('::', 1)[-1] == name]
+            args = [a for a in args_node.named_children if a.type != 'comment']
+            for target in targets[:1]:
+                params = [p.name for p in self._funcs[target].parameters]
+                bound = {p: a for p, a in zip(params, args) if p}
+                for pc in self._parametric_comparisons(target):
+                    values: List[float] = []
+                    operands: Set[str] = set()
+                    calls: Set[_Call] = set()
+                    for side in pc.sides:
+                        for param in side:
+                            arg = bound.get(param)
+                            if arg is None:
+                                continue
+                            value = _value(arg, src, self._consts)
+                            if value is not None:
+                                values.append(value)
+                            else:
+                                operands.update(_identifiers(arg, src))
+                                calls |= _calls_in(arg, src, first_line)
+                    if values:
+                        out.append(_Comparison(
+                            line=first_line + call.start_point[0],
+                            text=f"{' '.join(get_text(call, src).split())} -> {pc.text}",
+                            kind=pc.kind, values=tuple(values), operands=frozenset(operands),
+                            calls=frozenset(calls), in_for_condition=_in_for_condition(call)))
+        return out
 
     # ── Named constants ─────────────────────────────────────────────────────
 
