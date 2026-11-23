@@ -16,6 +16,9 @@ from rag_engine.features.sensor_analysis import SensorAnalyzer
 from rag_engine.features.sensor_data_checker import load_samples_csv, replay_samples
 from rag_engine.features.sensor_template import SensorTemplate, load_sensor_templates
 from rag_engine.features.standards_validator import StandardsValidator
+from rag_engine.knowledge_base.standards_document import load_standards_document
+from rag_engine.retrieval import HybridRetriever, chunk_functions
+from rag_engine.retrieval.models import load_embedder, load_reranker
 from rag_engine.features.virtual_analysis import VirtualAnalyzer
 from rag_engine.llm.ollama_client import OllamaClient
 from rag_engine.llm.rag_narrator import RAGNarrativeGenerator
@@ -35,6 +38,8 @@ class AnalysisResults:
     error: Optional[str] = None
     sensors: Any = None                   # None unless cfg.sensor_templates_file is set
     sensor_replay: Any = None             # ReplayResult; None unless cfg.sensor_samples_file is also set
+    standards_doc: Any = None             # StandardsDocument: rules extracted from the uploaded standard + its index
+    code_index: Any = None                # HybridRetriever over the functions (BM25, + dense with semantic search)
     graph: Any = None                     # the built CallGraphBuilder
     parse_results: Dict[str, ParseResult] = field(default_factory=dict)
     report_paths: List[str] = field(default_factory=list)
@@ -128,6 +133,15 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
     r = AnalysisResults()
     # Bad templates are the cheapest mistake to report, so check them before parsing.
     templates = _load_templates(cfg.sensor_templates_file) if cfg.sensor_templates_file else None
+    standards_doc = None
+    if cfg.standards_file:
+        try:
+            standards_doc = load_standards_document(
+                cfg.standards_file, cfg.cache_dir, cfg.embedding_model if use_semantic_search else None,
+                cfg.reranker_model if use_semantic_search else None)
+        except ValueError as exc:
+            raise InputError(f"Coding standards: {exc}") from exc
+    r.standards_doc = standards_doc
     samples = None
     if cfg.sensor_samples_file:
         if templates is None:
@@ -152,6 +166,10 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
     r.graph = gb
     if use_semantic_search:
         r.search = _semantic_search(cfg, reader.all_functions(current))
+    r.code_index = HybridRetriever(
+        chunk_functions(reader.all_functions(current)),
+        load_embedder(cfg.embedding_model) if use_semantic_search else None,
+        load_reranker(cfg.reranker_model if use_semantic_search else None), cfg.cache_dir, 'code')
     lru_doc_texts = DocReader().read_lru_documents(lru_docs) if lru_docs else {}
 
     step('Virtual function analysis', 30)
@@ -161,7 +179,7 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
     r.dead = DeadCodeDetector(gb, current, cfg.entry_points, cfg.entry_point_patterns,
                               cfg.dead_code_dispositions or None).analyze()
     step('Standards validation', 60)
-    r.standards = StandardsValidator(cfg, current).analyze()
+    r.standards = StandardsValidator(cfg, current, standards_doc).analyze()
     step('Coupling analysis', 70)
     r.coupling = CouplingAnalyzer(current, gb, r.search, lru_doc_texts).analyze()
     if templates is not None:
@@ -175,7 +193,7 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
     llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
     if write_reports and cfg.ollama_enabled and llm.is_available():
         step(f"LLM enrichment via {cfg.ollama_model}", 85)
-        rag = RAGNarrativeGenerator(llm, r.search)
+        rag = RAGNarrativeGenerator.for_results(llm, r)
         for key, (query, summary, k) in _narrative_tasks(cfg, r).items():
             try:
                 narrative = rag.generate(query, summary, k=k, max_tokens=800)

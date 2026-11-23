@@ -198,7 +198,7 @@ def test_validate_config_rejects_pdf_without_rule_rows(tmp_path):
     c.drawString(50, 700, 'No rules in here')
     c.save()
     result = runner.invoke(main.app, ['validate-config', '--coding-standards-pdf', str(pdf)])
-    assert result.exit_code == 1 and 'no SCS-L-xx' in result.output
+    assert result.exit_code == 1 and 'no checkable rule recognised' in result.output
 
 
 def test_validate_config_reads_sample_standards_pdf():

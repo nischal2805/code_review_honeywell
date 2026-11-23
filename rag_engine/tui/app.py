@@ -910,7 +910,7 @@ class ChatScreen(Screen):
     def _ask(self, question: str) -> str:
         narrator = None
         if self._cfg.ollama_enabled and self._ollama.is_available():
-            narrator = RAGNarrativeGenerator(self._ollama, self._results.search)
+            narrator = RAGNarrativeGenerator.for_results(self._ollama, self._results)
         return answer_question(question, self._results, narrator)
 
     def _answer(self, question: str) -> None:

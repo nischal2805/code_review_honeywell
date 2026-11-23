@@ -18,6 +18,7 @@ class Config:
     output_dir: str = 'output'
     cache_dir: str = '.rag_cache'
     embedding_model: str = 'all-MiniLM-L6-v2'
+    reranker_model: str = 'cross-encoder/ms-marco-MiniLM-L-6-v2'   # 'lexical' for no neural reranker
     ollama_url: str = 'http://localhost:11434'
     ollama_model: str = 'llama3.1:8b'
     ollama_enabled: bool = False

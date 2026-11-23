@@ -196,4 +196,4 @@ def test_standards_report_table_rows_are_contiguous(tmp_path):
     md = Path(ReportGenerator(Config(output_dir=str(tmp_path))).generate_standards(report, 'markdown')).read_text()
     table = md[md.index('| Severity | Rule |'):].splitlines()
     assert table[2].startswith('| MINOR') and table[3].startswith('| MAJOR')   # no blank line between rows
-    assert 'pipe \\| inside and newline' in table[2] and table[2].count(' | ') == 6
+    assert 'pipe \\| inside and newline' in table[2] and table[2].count(' | ') == 7   # 8 columns incl. Standard reference

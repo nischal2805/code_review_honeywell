@@ -1,16 +1,17 @@
 from __future__ import annotations
 import copy
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from rag_engine.config import Config
-from rag_engine.knowledge_base.standards_profile import (
-    deep_merge,
-    load_raw_standards_profile,
-    resolve_standards_profile,
+from rag_engine.knowledge_base.standards_document import (
+    ENFORCED, RULES, VIOLATION_RULES, RuleSource, StandardsDocument, load_standards_document,
 )
+from rag_engine.knowledge_base.standards_profile import deep_merge, resolve_standards_profile
+from rag_engine.retrieval.retriever import best_sentence
 from rag_engine.models import FunctionDef, ParseResult, Violation
 
 
@@ -23,6 +24,9 @@ class ComplianceReport:
     corrections: Dict[str, str]
     standards_source: str = 'built-in defaults'
     active_rules: Dict[str, Any] | None = None
+    # one row per rule for the configured DAL: rule, label, value, origin (document/default), citation, clause
+    rule_table: List[Dict[str, Any]] = field(default_factory=list)
+    unchecked_clauses: List[Tuple[str, str]] = field(default_factory=list)   # normative, not enforced
 
 
 _FIXES = {
@@ -36,15 +40,18 @@ _FIXES = {
     'DO178-PARAM-COUNT': 'Group related parameters into a struct/configuration object',
     'DO178-UNBOUNDED-LOOP': 'Add explicit loop counter or timeout condition',
     'DO178-NO-DOCSTRING': 'Add comment: purpose, inputs, outputs, DO-178C req trace',
-    'DO178-NAMING': 'Rename to camelCase or snake_case per project code standard',
+    'DO178-NAMING': 'Rename to the function naming convention of the project code standard',
+    'DO178-CLASS-NAMING': 'Rename the class to the class naming convention of the project code standard',
 }
 
 
 class StandardsValidator:
-    def __init__(self, config: Config, parse_results: Dict[str, ParseResult]) -> None:
+    def __init__(self, config: Config, parse_results: Dict[str, ParseResult],
+                 standards_doc: Optional[StandardsDocument] = None) -> None:
         self._cfg = config
         self._results = parse_results
         self._all_funcs: List[FunctionDef] = [fn for r in parse_results.values() for fn in r.functions]
+        self._doc = standards_doc
         self._rules = self._load_rules()
 
     def analyze(self) -> ComplianceReport:
@@ -56,6 +63,8 @@ class StandardsValidator:
             violations.extend(self._check_documentation(fn))
         for result in self._results.values():
             violations.extend(self._check_file(result))
+            violations.extend(self._check_class_naming(result))
+        self._cite(violations)
 
         total = len(self._all_funcs)
         weights = {'CRITICAL': 10, 'MAJOR': 5, 'MEDIUM': 2, 'MINOR': 1}
@@ -69,17 +78,18 @@ class StandardsValidator:
                                 total_functions_checked=total, violations_by_severity=by_sev,
                                 corrections=corrections,
                                 standards_source=self._cfg.standards_file or 'built-in defaults',
-                                active_rules=self._rules)
+                                active_rules=self._rules, rule_table=self._rule_table(),
+                                unchecked_clauses=list(self._doc.unchecked) if self._doc else [])
 
     def _load_rules(self) -> Dict[str, Any]:
         profile = copy.deepcopy(self._cfg.standards_profile)
-        if self._cfg.standards_file:
+        if self._doc is None and self._cfg.standards_file:
             try:
-                profile = deep_merge(profile, load_raw_standards_profile(self._cfg.standards_file))
-            except FileNotFoundError:
-                logger.warning(f"Standards profile not found: {self._cfg.standards_file} — using defaults")
+                self._doc = load_standards_document(self._cfg.standards_file, cache_dir=None)
             except Exception as exc:
-                logger.warning(f"Failed to load standards profile {self._cfg.standards_file}: {exc} — using defaults")
+                logger.warning(f"Failed to load standards {self._cfg.standards_file}: {exc} — using defaults")
+        if self._doc is not None:
+            profile = deep_merge(profile, self._doc.profile)
         return resolve_standards_profile(
             profile,
             cyclomatic_complexity_max=self._cfg.cyclomatic_complexity_max,
@@ -87,6 +97,98 @@ class StandardsValidator:
             nesting_depth_max=self._cfg.nesting_depth_max,
             param_count_max=self._cfg.param_count_max,
         )
+
+    @staticmethod
+    def _applies(policy: str) -> bool:
+        """A construct the standard explicitly allows is not a violation."""
+        return str(policy).upper().strip() != 'ALLOWED'
+
+    # ── Traceability to the standards document ──────────────────────────────
+
+    def _origin(self, rule: str) -> Optional[RuleSource]:
+        return self._doc.citation_for(rule, self._cfg.dal_level, self._values().get(rule)) if self._doc else None
+
+    def _values(self) -> Dict[str, Any]:
+        """rule key -> the value in force for the configured DAL."""
+        dal_cfg = self._rules.get('dal_specific_standards', {}).get(self._cfg.dal_level, {})
+        universal = self._rules.get('universal_standards', {})
+        return {
+            **{f'complexity.{k}': v for k, v in dal_cfg.get('complexity', {}).items()},
+            **{f'prohibited.{k}': v for k, v in dal_cfg.get('severities', {}).get('prohibited_constructs', {}).items()},
+            'prohibited.goto': universal.get('prohibited_constructs', {}).get('goto'),
+            'documentation.missing_docstring': universal.get('documentation', {}).get('missing_docstring'),
+            **{f'naming.{k}': v.get('convention') for k, v in self._rules.get('naming_conventions', {}).items()
+               if isinstance(v, dict)},
+        }
+
+    def _cite(self, violations: List[Violation]) -> None:
+        """Point every violation at the clause that sets its rule, or say it is a built-in default. When the
+        document sets no value, the closest clause found by retrieval is quoted as related, never as the source."""
+        cache: Dict[str, Optional[str]] = {}
+        for v in violations:
+            rule = VIOLATION_RULES.get(v.rule)
+            if rule is None and v.rule != 'DO178-UNBOUNDED-LOOP':
+                continue
+            key = rule or v.rule
+            if key not in cache:
+                cache[key] = self._reference(rule, 'unbounded loop termination bound' if rule is None else RULES[rule][1])
+            v.standard_ref = cache[key]
+
+    def _reference(self, rule: Optional[str], query: str) -> Optional[str]:
+        src = self._origin(rule) if rule else None
+        if src is not None:
+            return f'{src.citation}: "{src.clause}"'
+        if self._doc is not None and self._doc.structured and rule and self._in_structured(rule):
+            return f'{Path(self._doc.path).name} (structured profile)'
+        hits = [h for h in (self._doc.search(query, k=1) if self._doc else []) if h.lexical_rank is not None]
+        if hits:
+            return f'related, not the rule source — {hits[0].chunk.cite()}: "{best_sentence(hits[0].chunk.text, query)}"'
+        return 'built-in default (not set by the standards document)' if self._doc else None
+
+    def _in_structured(self, rule: str) -> bool:
+        group, name = rule.split('.', 1)
+        p = self._doc.profile if self._doc else {}
+        if group == 'naming':
+            return name in p.get('naming_conventions', {})
+        dal = p.get('dal_specific_standards', {}).get(self._cfg.dal_level, {})
+        if group == 'complexity':
+            return name in dal.get('complexity', {})
+        return name in dal.get('severities', {}).get('prohibited_constructs', {}) or \
+            name in p.get('universal_standards', {}).get('prohibited_constructs', {})
+
+    def _rule_table(self) -> List[Dict[str, Any]]:
+        values = self._values()
+        rows = []
+        for rule, (label, _) in RULES.items():
+            if values.get(rule) is None:
+                continue
+            src = self._origin(rule)
+            structured = self._doc is not None and self._doc.structured and self._in_structured(rule)
+            rows.append({'rule': rule, 'label': label, 'value': values[rule],
+                         'origin': 'document' if src or structured else 'default',
+                         'enforced': rule in ENFORCED and (rule != 'naming.class' or self._class_naming_on()),
+                         'citation': src.citation if src else (Path(self._doc.path).name if structured else ''),
+                         'clause': src.clause if src else ''})
+        return rows
+
+    def _class_naming_on(self) -> bool:
+        """Class names are checked when the standards document sets a class convention."""
+        return self._doc is not None and (self._origin('naming.class') is not None
+                                          or (self._doc.structured and self._in_structured('naming.class')))
+
+    def _check_class_naming(self, result: ParseResult) -> List[Violation]:
+        if not self._class_naming_on():
+            return []
+        rule = self._rules.get('naming_conventions', {}).get('class', {})
+        pattern, convention = rule.get('regex'), rule.get('convention', 'PascalCase')
+        out = []
+        for cls in result.class_defs:
+            short = cls.name.rsplit('::', 1)[-1]
+            if pattern and short and not re.match(pattern, short):
+                out.append(Violation(rule='DO178-CLASS-NAMING', misra_ref=None, file=cls.file_path, line=cls.line_number,
+                                     element=cls.name, message=f"class '{cls.name}' does not match {convention}",
+                                     severity='MINOR'))
+        return out
 
     @staticmethod
     def _policy_to_violation_severity(policy: str, default: str = 'MAJOR') -> str:
@@ -162,31 +264,31 @@ class StandardsValidator:
         prohibited = dal_cfg.get('severities', {}).get('prohibited_constructs', {}) if isinstance(dal_cfg, dict) else {}
         if re.search(r'\bgoto\b', body):
             policy = universal.get('prohibited_constructs', {}).get('goto', 'FORBIDDEN') if isinstance(universal, dict) else 'FORBIDDEN'
-            out.append(Violation(rule='DO178-GOTO', misra_ref='MISRA-C++:6-6-1', file=fn.file_path,
+            if self._applies(policy): out.append(Violation(rule='DO178-GOTO', misra_ref='MISRA-C++:6-6-1', file=fn.file_path,
                                  line=self._body_line(fn, r'\bgoto\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'CRITICAL'),
                                  message=f"'goto' in '{fn.name}' — prohibited by DO-178C"))
         if re.search(r'\b(?:new|delete)\b', body) or re.search(r'\b(?:malloc|calloc|realloc|free)\s*\(', body):
             policy = prohibited.get('dynamic_memory', 'FORBIDDEN')
-            out.append(Violation(rule='DO178-DYNAMIC-MEM', misra_ref=None, file=fn.file_path,
+            if self._applies(policy): out.append(Violation(rule='DO178-DYNAMIC-MEM', misra_ref=None, file=fn.file_path,
                                  line=self._body_line(fn, r'\b(?:new|delete|malloc|calloc|realloc|free)\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'CRITICAL'),
                                  message=f"Dynamic memory in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if re.search(r'\b(?:try|catch)\b', body):
             policy = prohibited.get('exceptions', 'FORBIDDEN')
-            out.append(Violation(rule='DO178-EXCEPTION', misra_ref='MISRA-C++:15-0-1', file=fn.file_path,
+            if self._applies(policy): out.append(Violation(rule='DO178-EXCEPTION', misra_ref='MISRA-C++:15-0-1', file=fn.file_path,
                                  line=self._body_line(fn, r'\b(?:try|catch)\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"Exception handling in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if fn.sig_key in fn.calls:
             policy = prohibited.get('recursion', 'FORBIDDEN')
-            out.append(Violation(rule='DO178-RECURSION', misra_ref=None, file=fn.file_path,
+            if self._applies(policy): out.append(Violation(rule='DO178-RECURSION', misra_ref=None, file=fn.file_path,
                                  line=self._body_line(fn, rf'\b{re.escape(fn.name)}\s*\('), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"Recursive call in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))
         if re.search(r'\b(?:dynamic_cast|typeid)\b', body):
             policy = prohibited.get('rtti', 'FORBIDDEN')
-            out.append(Violation(rule='DO178-RTTI', misra_ref='MISRA-C++:5-2-2', file=fn.file_path,
+            if self._applies(policy): out.append(Violation(rule='DO178-RTTI', misra_ref='MISRA-C++:5-2-2', file=fn.file_path,
                                  line=self._body_line(fn, r'\b(?:dynamic_cast|typeid)\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'MAJOR'),
                                  message=f"RTTI in '{fn.name}' — {policy.lower()} for DAL {self._cfg.dal_level}"))

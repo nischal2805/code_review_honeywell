@@ -5,10 +5,12 @@ The deterministic facts come first; when a local LLM is available it only explai
 from __future__ import annotations
 import difflib
 import re
+from pathlib import Path
 from collections import Counter
 from typing import TYPE_CHECKING, Callable, Iterable, List, Optional, Set, Tuple
 
 from rag_engine.features.function_effect import FunctionEffectAnalyzer, format_effect
+from rag_engine.retrieval.retriever import best_sentence
 
 if TYPE_CHECKING:
     from rag_engine.features.sensor_analysis import SensorFinding
@@ -44,7 +46,9 @@ _HELP = ("I can answer questions about your analysis results.\nTry:\n"
          "  'what validation checks are applied to <Sensor>'\n"
          "  'is the stale check implemented for <Sensor>' / 'why is <Sensor> inconclusive'\n"
          "  'which sensors have missing checks' / 'what is the data flow of <Sensor>'\n"
-         "  'what is the inheritance of <Class>'")
+         "  'what is the inheritance of <Class>'\n"
+         "  'what is the maximum function length' / 'is recursion allowed' / 'which rules come from the document'\n"
+         "  'what does the standard say about <topic>'")
 
 
 _NO_FACTS_LABEL = "Explanation (local LLM — no specific static-analysis facts matched; summary facts used)"
@@ -516,6 +520,70 @@ def results_summary(results: AnalysisResults) -> str:
     return '\n'.join(lines)
 
 
+_RULE_WORDS = [   # (pattern, rule key) — which rule a standards question is about
+    (r'cyclomatic|mccabe|complexity', 'complexity.cyclomatic_complexity_max'),
+    (r'nest', 'complexity.nesting_depth_max'),
+    (r'parameter|argument', 'complexity.parameter_count_max'),
+    (r'function length|how long|lines|length', 'complexity.function_length_max'),
+    (r'\bgoto\b', 'prohibited.goto'),
+    (r'dynamic memory|malloc|heap|\bnew\b|allocat', 'prohibited.dynamic_memory'),
+    (r'exception|try|catch|throw', 'prohibited.exceptions'),
+    (r'recursi', 'prohibited.recursion'),
+    (r'rtti|dynamic_cast|typeid', 'prohibited.rtti'),
+    (r'class(?:es)? nam|nam\w* (?:of |for )?class', 'naming.class'),
+    (r'naming|camel|pascal|snake|function names?', 'naming.function'),
+    (r'comment|document', 'documentation.missing_docstring'),
+]
+_STANDARDS_TOPIC = re.compile(r'\b(?:standards?|clauses?|rules?|guidelines?|coding standard|document|allowed|permitted|'
+                              r'prohibited|forbidden|limit|maximum|max|convention|required?|requires|can i|may i|ok to)\b', re.IGNORECASE)
+
+
+def _rule_line(row: dict) -> str:
+    origin = (f"from the document — {row['citation']}: \"{row['clause']}\"" if row['origin'] == 'document' and row['clause']
+              else f"from the document ({row['citation']})" if row['origin'] == 'document'
+              else 'built-in default (the document does not set it)')
+    checked = '' if row['enforced'] else ' [not checked automatically]'
+    return f"  {row['label']}: {row['value']}{checked} — {origin}"
+
+
+def _standards_question(question: str, results: AnalysisResults) -> Optional[str]:
+    """Coding-standard questions: the rules in force (deterministic), else clauses retrieved from the document."""
+    std = results.standards
+    doc = getattr(results, 'standards_doc', None)
+    q = question.lower()
+    if std is None or 'violation' in q:
+        return None
+    if not (_STANDARDS_TOPIC.search(q) or any(re.search(p, q) for p, _ in _RULE_WORDS)):
+        return None
+    rows = getattr(std, 'rule_table', None) or []
+    source = f"Coding standard: {std.standards_source}"
+    if re.search(r'not (?:be )?(?:checked|enforced|verified)|unchecked|cannot (?:be )?check', q):
+        clauses = getattr(std, 'unchecked_clauses', []) or []
+        return (f"{source}\nNormative clauses the tool does not check automatically: {len(clauses)}\n"
+                + ('\n'.join(f"  {cite}: \"{text}\"" for text, cite in clauses) or '  none'))
+    if re.search(r'which rules|what rules|rules (?:in force|extracted|apply|used)|from the document|default', q):
+        doc_rows = [r for r in rows if r['origin'] == 'document']
+        return (f"{source}\n"
+                f"{len(doc_rows)} rule(s) set by the document, {len(rows) - len(doc_rows)} built-in default(s):\n"
+                + '\n'.join(_rule_line(r) for r in rows))
+    by_rule = {r['rule']: r for r in rows}
+    for pattern, rule in _RULE_WORDS:
+        if re.search(pattern, q) and rule in by_rule:
+            answer = f"{source}\n{_rule_line(by_rule[rule])}"
+            if doc is not None and by_rule[rule]['origin'] != 'document':
+                hits = [h for h in doc.search(question, k=2) if h.lexical_rank is not None or h.dense_rank == 0]
+                answer += ''.join(f"\n  Related clause (retrieved, not the rule source) — {h.chunk.cite()}: "
+                                  f"\"{best_sentence(h.chunk.text, question)}\"" for h in hits)
+            return answer
+    if doc is not None:
+        hits = doc.search(question, k=3)
+        if hits:
+            return (f"From {Path(doc.path).name} (retrieved by {doc.retriever.mode}; quoted, not interpreted):\n"
+                    + '\n'.join(f"  {i}. {h.chunk.cite()}: \"{best_sentence(h.chunk.text, question)}\""
+                                 for i, h in enumerate(hits, 1)))
+    return None
+
+
 def _facts(question: str, results: AnalysisResults) -> Optional[str]:
     """Structural answer, else summary answer, else a not-found message; None when nothing applies.
 
@@ -526,7 +594,7 @@ def _facts(question: str, results: AnalysisResults) -> Optional[str]:
         return answer
     if missing is not None and missing.likely_typo:
         return missing
-    return _summary_answer(question, results) or missing
+    return _standards_question(question, results) or _summary_answer(question, results) or missing
 
 
 def offline_answer(question: str, results: AnalysisResults) -> str:

@@ -2,6 +2,8 @@ dal_level: B
 output_dir: output
 cache_dir: .rag_cache
 embedding_model: all-MiniLM-L6-v2
+# Cross-encoder used to rerank retrieved standard clauses and code ('lexical' = no neural reranker).
+reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
 ollama_url: http://localhost:11434
 ollama_model: gpt-oss:20b
 ollama_enabled: true

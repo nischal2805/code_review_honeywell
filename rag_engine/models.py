@@ -219,6 +219,7 @@ class Violation:
     severity: Literal['MINOR', 'MEDIUM', 'MAJOR', 'CRITICAL']
     disposition: Optional[str] = None
     function_line: Optional[int] = None
+    standard_ref: Optional[str] = None   # the standards-document clause that sets this rule, or 'built-in default'
 
 
 @dataclass

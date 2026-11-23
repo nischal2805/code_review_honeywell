@@ -36,6 +36,7 @@ def test_full_run_then_every_page(tmp_path):
     cfg.output_dir, cfg.cache_dir = str(tmp_path / 'out'), str(tmp_path / 'cache')
     cfg.sensor_templates_file = str(ROOT / 'tests' / 'fixtures' / 'sensor_templates.yaml')
     cfg.sensor_samples_file = str(ROOT / 'tests' / 'fixtures' / 'sensor_samples.csv')
+    cfg.standards_file = str(ROOT / 'samples' / 'coding_standards_strict.pdf')
     state = at.session_state['run']
     start_run(state, cfg, str(ROOT / 'tests' / 'fixtures' / 'cpp'), None, None, 'markdown', False)
     for _ in range(120):

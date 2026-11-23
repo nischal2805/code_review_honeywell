@@ -28,7 +28,7 @@ def test_find_related_returns_function_defs(indexed_search):
 
 def test_find_related_relevance(indexed_search):
     results = indexed_search.find_related('getSpeed vehicle', k=5)
-    names = [r.name for r in results]
+    names = [r.name.rsplit('::', 1)[-1] for r in results]     # methods are named Class::method
     assert 'getSpeed' in names
 
 

@@ -110,6 +110,8 @@ class ReportGenerator:
             'report_date': date.today().isoformat(),
             'dal_level': self._cfg.dal_level,
             'standards_source': result.standards_source,
+            'rules': getattr(result, 'rule_table', []),
+            'unchecked': getattr(result, 'unchecked_clauses', []),
             'violations': result.violations,
             'compliance_score': round(result.compliance_score, 1),
             'llm_narrative': llm_narrative,

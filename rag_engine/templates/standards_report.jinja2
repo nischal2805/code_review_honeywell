@@ -13,16 +13,39 @@ Compliance Score: {{ compliance_score }}%
 | MEDIUM   | {{ violations | selectattr('severity', 'eq', 'MEDIUM') | list | length }} |
 | MINOR    | {{ violations | selectattr('severity', 'eq', 'MINOR') | list | length }} |
 
+{% if rules %}
+## Rules in Force (DAL {{ dal_level }})
+
+{% set from_doc = rules | selectattr('origin', 'eq', 'document') | list %}
+{{ from_doc | length }} of {{ rules | length }} rules are set by the coding standard; the rest are built-in defaults.
+
+| Rule | Value | Origin | Checked | Source clause |
+|------|-------|--------|---------|---------------|
+{% for r in rules %}
+| {{ r.label }} | {{ r.value }} | {{ r.origin }} | {{ 'yes' if r.enforced else 'no' }} | {% if r.clause %}{{ r.citation|md_cell }}: “{{ r.clause|md_cell }}”{% elif r.citation %}{{ r.citation|md_cell }}{% else %}-{% endif %} |
+{% endfor %}
+
+{% endif %}
+{% if unchecked %}
+## Normative Clauses Not Checked Automatically
+
+These requirements of the standard map to no automated check; they need manual review.
+
+{% for text, cite in unchecked %}
+- {{ cite }}: “{{ text }}”
+{% endfor %}
+
+{% endif %}
 {% if llm_narrative %}
-## AI Certification Assessment
+## AI Assessment (local LLM — explanation of the findings)
 
 {{ llm_narrative }}
 {% endif %}
 
 ## Violations
 
-| Severity | Rule | File | Function start line | Violation line | Element | Message |
-|----------|------|------|---------------------|----------------|---------|---------|
+| Severity | Rule | File | Function start line | Violation line | Element | Message | Standard reference |
+|----------|------|------|---------------------|----------------|---------|---------|--------------------|
 {% for v in violations %}
-| {{ v.severity }} | {{ v.rule }} | {{ v.file|md_cell }} | {{ v.function_line or 'N/A' }} | {{ v.line }} | `{{ v.element|md_cell }}` | {{ v.message|md_cell }}{% if v.misra_ref %} (MISRA: {{ v.misra_ref }}){% endif %} |
+| {{ v.severity }} | {{ v.rule }} | {{ v.file|md_cell }} | {{ v.function_line or 'N/A' }} | {{ v.line }} | `{{ v.element|md_cell }}` | {{ v.message|md_cell }}{% if v.misra_ref %} (MISRA: {{ v.misra_ref }}){% endif %} | {{ (v.standard_ref or '-')|md_cell }} |
 {% endfor %}

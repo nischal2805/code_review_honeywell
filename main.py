@@ -133,28 +133,26 @@ def validate_config(
     selected = _select_standards(standards_file, coding_standards_pdf)
     if selected:
         cfg.standards_file = selected
-    if coding_standards_pdf:
-        from rag_engine.knowledge_base.standards_profile import _read_document_text, load_raw_standards_profile
+    if selected:
+        from rag_engine.knowledge_base.standards_document import RULES, load_standards_document
         try:
-            profile = load_raw_standards_profile(selected)
-            text = _read_document_text(Path(selected))
-        except (ValueError, OSError) as exc:
-            raise _fail(f"Coding standards PDF {coding_standards_pdf} could not be read: {exc}")
-        # The parser falls back to built-in limits for any rule it cannot find, so 'OK' needs real rule rows.
-        if not re.search(r'\bSCS-[LM]-\d{2}\b', text, re.IGNORECASE):
-            raise _fail(f"Coding standards PDF {coding_standards_pdf}: no SCS-L-xx / SCS-M-xx rule rows found; "
+            doc = load_standards_document(selected)
+        except ValueError as exc:
+            raise _fail(f"Coding standards {selected}: {exc}")
+        if not doc.sources and not doc.structured:
+            raise _fail(f"Coding standards {Path(selected).name}: no checkable rule recognised in the document; "
                         "the built-in default limits would be used instead")
-        dal_rules = profile.get('dal_specific_standards') if isinstance(profile, dict) else None
-        limits = []
-        for dal, rules in (dal_rules or {}).items():
-            complexity = rules.get('complexity') if isinstance(rules, dict) else None
-            cc = complexity.get('cyclomatic_complexity_max') if isinstance(complexity, dict) else None
-            if cc is not None:
-                limits.append(f"{dal} CC limit {cc}")
-        if not limits:
-            raise _fail(f"Coding standards PDF {coding_standards_pdf}: no DAL complexity limits found "
-                        "(expected a rule table such as 'SCS-M-01 Cyclomatic Complexity | <= 5 | <= 8 | <= 12')")
-        typer.echo('Coding standards PDF OK — ' + ', '.join(limits))
+        typer.echo(f"Coding standards OK — {Path(selected).name}: "
+                   + ('structured profile' if doc.structured else
+                      f"{len(doc.sources)} rule(s) extracted, {len(doc.unchecked)} clause(s) not checked automatically"))
+        for rule, srcs in doc.sources.items():
+            for src in srcs:
+                typer.echo(f"  {RULES[rule][0]}: {src.value} (DAL {''.join(src.dals)}) — {src.citation}")
+        dal_rules = doc.profile.get('dal_specific_standards', {})
+        limits = [f"{dal} CC limit {cfg_.get('complexity', {}).get('cyclomatic_complexity_max')}"
+                  for dal, cfg_ in dal_rules.items() if cfg_.get('complexity', {}).get('cyclomatic_complexity_max')]
+        if limits:
+            typer.echo('  ' + ', '.join(limits))
     else:
         typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
 
@@ -258,13 +256,17 @@ def ask(
     codebase: str = typer.Argument(..., help='Path to C++ codebase directory'),
     question: str = typer.Argument(..., help='e.g. "What are the virtual functions implemented by TemperatureSensor?"'),
     sensor_templates: Optional[str] = _TEMPLATES,
+    standards_file: Optional[str] = typer.Option(None, '--standards-file', help='Coding standard (any supported format)'),
     config: str = _CONFIG,
 ) -> None:
     """Answer a question from the static analysis; the local LLM (if enabled) only explains the facts."""
     cfg = _load(config, sensor_templates)
+    selected = _select_standards(standards_file, None)
+    if selected:
+        cfg.standards_file = selected
     results = _model(cfg, codebase)
     llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
-    narrator = RAGNarrativeGenerator(llm, None) if cfg.ollama_enabled and llm.is_available() else None
+    narrator = RAGNarrativeGenerator.for_results(llm, results) if cfg.ollama_enabled and llm.is_available() else None
     typer.echo(answer_question(question, results, narrator))
 
 if __name__ == '__main__':

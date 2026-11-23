@@ -182,8 +182,11 @@ def configuration() -> None:
     k['dal'] = a.selectbox('DAL level', ['A', 'B', 'C', 'D'], index='ABCD'.index(k['dal']))
     k['out_fmt'] = b.selectbox('Report format', ['markdown', 'docx'], index=['markdown', 'docx'].index(k['out_fmt']))
     k['semantic'] = d.checkbox('Semantic search (needs sentence-transformers)', value=k['semantic'])
-    _upload('Upload a standards file (optional)', ['yaml', 'yml', 'json', 'pdf', 'docx', 'txt'], 'up_std', 'standards_path')
-    _path_input('Coding standards file path (YAML/JSON/PDF/DOCX/TXT, optional)', 'standards_path')
+    _upload('Upload your coding standard (PDF, DOCX, TXT, Markdown, YAML or JSON)',
+            ['pdf', 'docx', 'txt', 'md', 'markdown', 'rst', 'yaml', 'yml', 'json'], 'up_std', 'standards_path')
+    _path_input('Coding standard file path (optional; without one the built-in defaults are used)', 'standards_path')
+    if k['standards_path']:
+        _standards_preview(k['standards_path'])
     _path_input('Dead-code dispositions file (optional YAML)', 'disp_path',
                 'Where reviewer decisions are read from and saved to.')
 
@@ -207,6 +210,39 @@ def configuration() -> None:
             st.error(str(exc))
         if not k['codebase'] or not Path(k['codebase']).expanduser().is_dir():
             st.warning('The C++ source directory is missing or not a directory.')
+
+
+@st.cache_resource(show_spinner='Reading the coding standard…', max_entries=4)
+def _standards_doc(path: str, mtime: float):
+    from rag_engine.knowledge_base.standards_document import load_standards_document
+    return load_standards_document(path)       # lexical index only: a quick preview
+
+
+def _standards_preview(path: str) -> None:
+    from rag_engine.knowledge_base.standards_document import RULES
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return
+    try:
+        doc = _standards_doc(str(p), p.stat().st_mtime)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    if doc.structured:
+        st.success(f'`{p.name}`: structured standards profile (YAML/JSON) — used as given.')
+        return
+    if not doc.sources:
+        st.warning(f'`{p.name}`: no checkable rule recognised. The built-in defaults would be used; the document is '
+                   'still indexed so the assistant can quote it.')
+    else:
+        st.success(f'`{p.name}`: {len(doc.sources)} rule(s) extracted from {len(doc.chunks)} indexed chunk(s); '
+                   f'{len(doc.unchecked)} normative clause(s) are not checked automatically.')
+    c.data_table([{'Rule': RULES[r][0], 'Value': src.value, 'DAL': ''.join(src.dals), 'Source': src.citation,
+                   'Clause': src.clause} for r, srcs in doc.sources.items() for src in srcs])
+    if doc.unchecked:
+        with st.expander('Clauses the tool does not check automatically'):
+            for text, cite in doc.unchecked:
+                st.markdown(f'- **{cite}**: {text}')
 
 
 def _from_config_yaml(attr: str) -> str:
@@ -422,15 +458,45 @@ def standards() -> None:
                   ('Major', sev.get('MAJOR', 0), '', 'warn' if sev.get('MAJOR') else 'ok'),
                   ('Medium / Minor', f"{sev.get('MEDIUM', 0)} / {sev.get('MINOR', 0)}")])
     st.caption(f'Standards source: {s.standards_source}. This is a static-analysis result, not a certification verdict.')
+    t_viol, t_rules, t_search = st.tabs(['Violations', 'Rules in force', 'Search the standard'])
+    with t_rules:
+        rows = getattr(s, 'rule_table', [])
+        n_doc = sum(r['origin'] == 'document' for r in rows)
+        st.caption(f'{n_doc} of {len(rows)} rules are set by the coding standard; the rest are built-in defaults.')
+        c.data_table([{'Rule': r['label'], 'Value': r['value'], 'Origin': r['origin'],
+                       'Checked': 'yes' if r['enforced'] else 'no', 'Source': r['citation'], 'Clause': r['clause']}
+                      for r in rows])
+        if getattr(s, 'unchecked_clauses', None):
+            with st.expander(f'{len(s.unchecked_clauses)} normative clause(s) not checked automatically'):
+                for text, cite in s.unchecked_clauses:
+                    st.markdown(f'- **{cite}**: {text}')
+    with t_search:
+        doc = getattr(r, 'standards_doc', None)
+        if doc is None or doc.retriever is None:
+            st.caption('No coding standard was supplied for the last run.')
+        else:
+            st.caption(f'Retrieval: {doc.retriever.mode} over {len(doc.chunks)} chunk(s) of `{Path(doc.path).name}`.')
+            query = st.text_input('Search the coding standard', placeholder='e.g. can I use malloc after start-up?')
+            if query:
+                for hit in doc.search(query, k=5):
+                    with st.expander(f'{hit.chunk.cite()} — score {hit.score:.2f}', expanded=True):
+                        st.write(hit.chunk.text)
+    with t_viol:
+        _violations_table(s)
+
+
+def _violations_table(s) -> None:
     chosen = st.multiselect('Severity', SEVERITIES, default=list(SEVERITIES))
     vs = [v for v in s.violations if v.severity in chosen]
     c.data_table([{'Severity': v.severity, 'Rule': v.rule, 'File': Path(v.file).name,
                    'Function line': v.function_line, 'Line': v.line, 'Element': v.element, 'Message': v.message,
-                   'MISRA': v.misra_ref} for v in vs], 'No violations match.')
+                   'MISRA': v.misra_ref, 'Standard reference': v.standard_ref} for v in vs], 'No violations match.')
     for v in [x for x in vs if x.severity in ('CRITICAL', 'MAJOR')][:50]:
         with st.expander(f'{v.severity} · {v.rule} · {v.element}'):
             st.markdown(f"{c.badge(v.severity)} `{v.file}:{v.line}`", unsafe_allow_html=True)
             st.write(v.message)
+            if v.standard_ref:
+                st.caption(f'Standard: {v.standard_ref}')
             fix = s.corrections.get(v.rule)
             if fix:
                 st.info(f'Suggested correction: {fix}')
@@ -634,7 +700,7 @@ def assistant() -> None:
         chat.append(('user', q))
         with st.spinner('Thinking…'):
             try:
-                narrator = RAGNarrativeGenerator(llm, r.search) if llm else None
+                narrator = RAGNarrativeGenerator.for_results(llm, r) if llm else None
                 ans = answer_question(q, r, narrator)
             except Exception as exc:
                 ans = f'The assistant failed: {type(exc).__name__}: {exc}'

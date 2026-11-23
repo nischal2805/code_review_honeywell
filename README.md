@@ -86,6 +86,31 @@ python main.py validate-config --coding-standards-pdf samples/coding_standards_s
 python main.py analyze sample_codebase --coding-standards-pdf samples/coding_standards_strict.pdf --output-format markdown
 ```
 
+### Coding standards: upload any document
+
+Point `standards_file` (or `--standards-file`, or the UI upload) at your coding standard — PDF, DOCX, TXT,
+Markdown, YAML or JSON. `samples/coding_standards_*.pdf` are dummies; replace them with the real document.
+
+* **Rule extraction** (`knowledge_base/standards_document.py`): normative clauses become enforced rules —
+  complexity / length / nesting / parameter limits ("shall not exceed 12", "fewer than 6 parameters",
+  "no body longer than 80 lines"), goto / dynamic memory / exceptions / recursion / RTTI policies from the
+  modal verb (shall not → forbidden, unless justified / should not → restricted, may → allowed and then not
+  flagged), function and class naming conventions, documentation requirements, and DAL scope ("For DAL A…",
+  a "Level B" section). Per-DAL rule tables (`SCS-L-xx` / `SCS-M-xx` rows) are still read as tables.
+* **Traceability:** every violation cites the clause that sets its rule (file, page, section); rules the
+  document does not set are labelled *built-in default*; normative clauses no check covers are listed as
+  *not checked automatically* for manual review. `python main.py validate-config --standards-file FILE`
+  shows what was extracted before you run.
+* **RAG** (`rag_engine/retrieval/`): structure-aware chunking with overlap (pages and sections kept),
+  BM25 with domain query expansion + dense embeddings (`embedding_model`), reciprocal-rank fusion,
+  cross-encoder reranking (`reranker_model`, blended with the fusion score) and near-duplicate removal.
+  Embeddings are cached per chunk content hash, so an edited document re-embeds only the changed chunks.
+  The standard and the code are both indexed. Without torch or the models, retrieval falls back to
+  BM25 + lexical reranking (the UI shows which mode is active).
+* **Assistant:** answers "what is the maximum function length", "is recursion allowed", "which rules come
+  from the document", "what does the standard say about …" from the rules in force and retrieved clauses,
+  quoted with their source; the local LLM (when enabled) gets the retrieved clauses and code as context.
+
 ### Sensor analysis (R3): one generic engine, one YAML entry per sensor
 
 Each sensor is a YAML entry (`category`, `class_name`, `valid_range`, `stale`, `debounce`, `corrupt`;
