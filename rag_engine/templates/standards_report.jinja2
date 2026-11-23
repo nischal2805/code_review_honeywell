@@ -24,6 +24,5 @@ Compliance Score: {{ compliance_score }}%
 | Severity | Rule | File | Function start line | Violation line | Element | Message |
 |----------|------|------|---------------------|----------------|---------|---------|
 {% for v in violations %}
-| {{ v.severity }} | {{ v.rule }} | {{ v.file }} | {{ v.function_line or 'N/A' }} | {{ v.line }} | `{{ v.element }}` | {{ v.message }}{% if v.misra_ref %} (MISRA: {{ v.misra_ref }}){% endif %} |
-
+| {{ v.severity }} | {{ v.rule }} | {{ v.file|md_cell }} | {{ v.function_line or 'N/A' }} | {{ v.line }} | `{{ v.element|md_cell }}` | {{ v.message|md_cell }}{% if v.misra_ref %} (MISRA: {{ v.misra_ref }}){% endif %} |
 {% endfor %}

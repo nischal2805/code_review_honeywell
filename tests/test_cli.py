@@ -189,3 +189,26 @@ def test_malformed_yaml_is_reported_as_an_error_not_a_traceback(tmp_path):
     assert result.exit_code == 1 and isinstance(result.exception, SystemExit)   # the _fail() exit, not an uncaught ValueError
     assert 'Error:' in result.stderr and 'broken.yaml' in result.stderr
     assert 'Traceback' not in result.output
+
+
+def test_validate_config_rejects_pdf_without_rule_rows(tmp_path):
+    from reportlab.pdfgen import canvas
+    pdf = tmp_path / 'empty.pdf'
+    c = canvas.Canvas(str(pdf))
+    c.drawString(50, 700, 'No rules in here')
+    c.save()
+    result = runner.invoke(main.app, ['validate-config', '--coding-standards-pdf', str(pdf)])
+    assert result.exit_code == 1 and 'no SCS-L-xx' in result.output
+
+
+def test_validate_config_reads_sample_standards_pdf():
+    pdf = Path(__file__).parent.parent / 'samples' / 'coding_standards_strict.pdf'
+    result = runner.invoke(main.app, ['validate-config', '--coding-standards-pdf', str(pdf)])
+    assert result.exit_code == 0 and 'A CC limit 5' in result.output
+
+
+def test_coding_standards_pdf_requires_pdf_suffix(tmp_path):
+    txt = tmp_path / 'rules.txt'
+    txt.write_text('x')
+    result = runner.invoke(main.app, ['validate-config', '--coding-standards-pdf', str(txt)])
+    assert result.exit_code == 1 and 'requires a .pdf' in result.output

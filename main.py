@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 os.environ.setdefault('USE_TF', '0')
 os.environ.setdefault('USE_TORCH', '1')
+import re
 import sys
 from pathlib import Path
 from typing import Any, List, Optional
@@ -75,16 +76,9 @@ def analyze(
     """Run all DO-178C analyses and generate §11-compliant reports."""
     cfg = _load(config, sensor_templates)
     logger.info(f"RAG Engine — DAL {cfg.dal_level}, output: {cfg.output_dir}")
-    selected_standards = coding_standards_pdf or standards_file
-    if coding_standards_pdf and standards_file:
-        typer.echo('Use either --coding-standards-pdf or --standards-file, not both', err=True)
-        raise typer.Exit(1)
-    if selected_standards:
-        selected_path = Path(selected_standards).expanduser()
-        if not selected_path.exists():
-            typer.echo(f"Standards file not found: {selected_standards}", err=True)
-            raise typer.Exit(1)
-        cfg.standards_file = str(selected_path)
+    selected = _select_standards(standards_file, coding_standards_pdf)
+    if selected:
+        cfg.standards_file = selected
 
     with tqdm(total=100, desc='Analysis') as bar:
         def progress(step: str, pct: int) -> None:
@@ -104,6 +98,21 @@ def analyze(
         raise typer.Exit(1)
 
 
+def _select_standards(standards_file: Optional[str], coding_standards_pdf: Optional[str]) -> Optional[str]:
+    """The standards file chosen on the command line (absolute), None for none; exits on a bad choice."""
+    if coding_standards_pdf and standards_file:
+        raise _fail('Use either --coding-standards-pdf or --standards-file, not both')
+    chosen = coding_standards_pdf or standards_file
+    if not chosen:
+        return None
+    path = Path(chosen).expanduser()
+    if not path.exists():
+        raise _fail(f"Standards file not found: {chosen}")
+    if coding_standards_pdf and path.suffix.lower() != '.pdf':
+        raise _fail('The --coding-standards-pdf option requires a .pdf file')
+    return str(path.resolve())
+
+
 @app.command()
 def validate_config(
     config: str = _CONFIG,
@@ -115,26 +124,31 @@ def validate_config(
 ) -> None:
     """Validate configuration file."""
     cfg = _load(config)
-    selected_standards = coding_standards_pdf or standards_file
-    if coding_standards_pdf and standards_file:
-        raise _fail('Use either --coding-standards-pdf or --standards-file, not both')
-    if selected_standards:
-        standards_path = Path(selected_standards).expanduser()
-        if not standards_path.exists():
-            raise _fail(f"Standards file not found: {selected_standards}")
-        cfg.standards_file = str(standards_path)
+    selected = _select_standards(standards_file, coding_standards_pdf)
+    if selected:
+        cfg.standards_file = selected
     if coding_standards_pdf:
-        standards_path = Path(coding_standards_pdf).expanduser()
-        if standards_path.suffix.lower() != '.pdf':
-            raise _fail('The --coding-standards-pdf option requires a .pdf file')
-        from rag_engine.knowledge_base.standards_profile import load_raw_standards_profile
-        profile = load_raw_standards_profile(standards_path)
-        typer.echo(
-            'Coding standards PDF OK — '
-            f"A CC limit {profile['dal_specific_standards']['A']['complexity']['cyclomatic_complexity_max']}, "
-            f"B CC limit {profile['dal_specific_standards']['B']['complexity']['cyclomatic_complexity_max']}, "
-            f"C CC limit {profile['dal_specific_standards']['C']['complexity']['cyclomatic_complexity_max']}"
-        )
+        from rag_engine.knowledge_base.standards_profile import _read_document_text, load_raw_standards_profile
+        try:
+            profile = load_raw_standards_profile(selected)
+            text = _read_document_text(Path(selected))
+        except (ValueError, OSError) as exc:
+            raise _fail(f"Coding standards PDF {coding_standards_pdf} could not be read: {exc}")
+        # The parser falls back to built-in limits for any rule it cannot find, so 'OK' needs real rule rows.
+        if not re.search(r'\bSCS-[LM]-\d{2}\b', text, re.IGNORECASE):
+            raise _fail(f"Coding standards PDF {coding_standards_pdf}: no SCS-L-xx / SCS-M-xx rule rows found; "
+                        "the built-in default limits would be used instead")
+        dal_rules = profile.get('dal_specific_standards') if isinstance(profile, dict) else None
+        limits = []
+        for dal, rules in (dal_rules or {}).items():
+            complexity = rules.get('complexity') if isinstance(rules, dict) else None
+            cc = complexity.get('cyclomatic_complexity_max') if isinstance(complexity, dict) else None
+            if cc is not None:
+                limits.append(f"{dal} CC limit {cc}")
+        if not limits:
+            raise _fail(f"Coding standards PDF {coding_standards_pdf}: no DAL complexity limits found "
+                        "(expected a rule table such as 'SCS-M-01 Cyclomatic Complexity | <= 5 | <= 8 | <= 12')")
+        typer.echo('Coding standards PDF OK — ' + ', '.join(limits))
     else:
         typer.echo(f"Config OK — DAL {cfg.dal_level}, output: {cfg.output_dir}")
 

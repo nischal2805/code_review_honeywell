@@ -210,8 +210,10 @@ class StandardsValidator:
             return out
         for m in re.finditer(r'\bwhile\s*\(\s*true\s*\)|\bfor\s*\(\s*;;\s*\)', src):
             line_no = src[:m.start()].count('\n') + 1
-            function_line = next((fn.line_number for fn in result.functions
-                                  if fn.line_number <= line_no), None)
+            # the innermost function whose span holds the loop; None for a loop outside every function
+            enclosing = [fn for fn in result.functions
+                         if fn.line_number <= line_no <= (fn.end_line_number or fn.line_number)]
+            function_line = max((fn.line_number for fn in enclosing), default=None)
             out.append(Violation(rule='DO178-UNBOUNDED-LOOP', misra_ref=None, file=result.file_path,
                                  line=line_no, function_line=function_line, element='loop', severity='MAJOR',
                                  message='Unbounded loop — exit condition must be proven'))

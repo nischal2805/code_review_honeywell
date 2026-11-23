@@ -175,3 +175,25 @@ def test_pdf_and_docx_standards_are_ingested(tmp_path):
         assert profile['dal_specific_standards']['C']['complexity']['cyclomatic_complexity_max'] == 20
         assert profile['dal_specific_standards']['B']['severities']['prohibited_constructs']['recursion'] == 'RESTRICTED'
         assert profile['naming_conventions']['function']['convention'] == 'PascalCase'
+
+
+def test_unbounded_loop_reports_its_enclosing_function(tmp_path):
+    (tmp_path / 'loops.cpp').write_text(
+        'void first() {\n    int a = 0;\n}\n\n'
+        'void second() {\n    while (true) {\n        break;\n    }\n}\n')
+    violations = StandardsValidator(Config(), CodeParser().parse_directory(str(tmp_path))).analyze().violations
+    loop = next(x for x in violations if x.rule == 'DO178-UNBOUNDED-LOOP')
+    assert (loop.line, loop.function_line) == (6, 5)   # second(), not the first function in the file
+
+
+def test_standards_report_table_rows_are_contiguous(tmp_path):
+    from rag_engine.models import Violation
+    from rag_engine.reporting.report_generator import ReportGenerator
+    from rag_engine.features.standards_validator import ComplianceReport
+    rows = [Violation('R1', None, 'a.cpp', 1, 'f', 'pipe | inside\nand newline', 'MINOR', function_line=1),
+            Violation('R2', None, 'b.cpp', 2, 'g', 'second', 'MAJOR', function_line=2)]
+    report = ComplianceReport(rows, 50.0, 2, {'MINOR': 1, 'MAJOR': 1}, {})
+    md = Path(ReportGenerator(Config(output_dir=str(tmp_path))).generate_standards(report, 'markdown')).read_text()
+    table = md[md.index('| Severity | Rule |'):].splitlines()
+    assert table[2].startswith('| MINOR') and table[3].startswith('| MAJOR')   # no blank line between rows
+    assert 'pipe \\| inside and newline' in table[2] and table[2].count(' | ') == 6
