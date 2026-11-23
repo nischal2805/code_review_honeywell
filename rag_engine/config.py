@@ -32,6 +32,7 @@ class Config:
     faiss_similarity_threshold: float = 0.6
     standards_file: str = ''
     sensor_templates_file: str = ''
+    sensor_samples_file: str = ''         # optional CSV (sensor,timestamp_ms,value) replayed through the rules
     standards_profile: Dict[str, Any] = field(default_factory=dict)
     lru_names: List[str] = field(default_factory=lambda: [
         'ADS', 'AGMCAL', 'AGM', 'APM', 'BCU', 'CLOCK',
@@ -78,7 +79,7 @@ def load_config(path: str = 'config.yaml') -> Config:
     valid = {k: v for k, v in data.items() if k in known and k != 'standards_profile' and v is not None}
     _check_types(valid)
     cfg = Config(**valid)
-    for attr in ('standards_file', 'sensor_templates_file', 'dead_code_dispositions'):
+    for attr in ('standards_file', 'sensor_templates_file', 'sensor_samples_file', 'dead_code_dispositions'):
         if getattr(cfg, attr):
             file_path = Path(getattr(cfg, attr))
             if not file_path.is_absolute():

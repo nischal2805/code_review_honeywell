@@ -132,7 +132,7 @@ def test_llm_narratives_reach_every_report_including_sensors(tmp_path, monkeypat
     cfg.ollama_enabled = True
     run_pipeline(cfg, str(SENSORS), use_semantic_search=False)
     sensor_md = (Path(cfg.output_dir) / 'sensor_analysis.md').read_text(encoding='utf-8')
-    assert 'AI Certification Assessment' in sensor_md and 'NARRATIVE-FOR: Sensor analysis' in sensor_md
+    assert '## AI Assessment' in sensor_md and 'NARRATIVE-FOR: Sensor analysis' in sensor_md
     assert 'NARRATIVE-FOR' in (Path(cfg.output_dir) / 'virtual_analysis.md').read_text(encoding='utf-8')
 
 

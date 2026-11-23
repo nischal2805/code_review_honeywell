@@ -1,64 +1,53 @@
 from __future__ import annotations
 
 import csv
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from rag_engine.features.sensor_template import SensorTemplate
+from rag_engine.features.sensor_validation import FLAGS, SampleResult, SensorValidator   # SampleResult re-exported
 
 Sample = Tuple[float, float]  # (timestamp_ms, value)
 
 
-@dataclass
-class SampleResult:
-    timestamp_ms: float
-    value: float
-    accepted_value: Optional[float]   # None until the first non-corrupt sample
-    flags: List[str] = field(default_factory=list)   # subset of corrupt / stale / debounce
-
-
 def check_samples(template: SensorTemplate, samples: List[Sample]) -> List[SampleResult]:
-    """Replay samples through the template's corrupt / stale / debounce rules."""
-    stale_ms = template.stale_threshold_ms
-    use_debounce = template.debounce_enabled and template.debounce_threshold is not None
-    prev_t = last_good = last_change_t = accepted = None
-    run = 0
-    results: List[SampleResult] = []
+    """Replay samples (sorted by time) through the generic validation engine with the template's rules."""
+    validator = SensorValidator(template)
+    return [validator.validate(t, v) for t, v in sorted(samples, key=lambda s: s[0])]
 
-    for t, v in sorted(samples, key=lambda s: s[0]):
-        gap_stale = stale_ms is not None and prev_t is not None and t - prev_t > stale_ms
-        prev_t = t
 
-        corrupt = not math.isfinite(v) or (template.corrupt_range_check and (
-            (template.valid_min is not None and v < template.valid_min)
-            or (template.valid_max is not None and v > template.valid_max)))
-        if corrupt:
-            results.append(SampleResult(t, v, accepted, ['corrupt'] + (['stale'] if gap_stale else [])))
+@dataclass
+class SensorReplay:
+    sensor: str
+    results: List[SampleResult]
+    counts: Dict[str, int]
+
+
+@dataclass
+class ReplayResult:
+    """CSV replay of every sensor: shows how the configured rules treat the supplied samples. It does not
+    show that the C++ runtime behaves the same way."""
+    source: str
+    sensors: Dict[str, SensorReplay] = field(default_factory=dict)
+    unknown_sensors: List[str] = field(default_factory=list)      # in the CSV, no YAML configuration
+    without_samples: List[str] = field(default_factory=list)      # configured, no samples in the CSV
+
+
+def replay_samples(templates: List[SensorTemplate], samples: Dict[str, List[Sample]], source: str = '') -> ReplayResult:
+    """Associate each CSV sensor with its configuration (by name, else by class_name) and replay it."""
+    by_name = {t.name: t for t in templates}
+    by_class = {t.class_name: t for t in templates if t.class_name}
+    result = ReplayResult(source)
+    for sensor, rows in samples.items():
+        tpl = by_name.get(sensor) or by_class.get(sensor)
+        if tpl is None:
+            result.unknown_sensors.append(sensor)
             continue
-
-        if last_good is None or abs(v - last_good) > 1e-9:
-            last_change_t = t
-        last_good = v
-        frozen_stale = (stale_ms is not None and template.stale_detect_frozen
-                        and t - last_change_t > stale_ms)
-
-        debounced = False
-        if not use_debounce or accepted is None:
-            accepted = v
-        elif abs(v - accepted) > template.debounce_threshold:
-            run += 1
-            if run >= template.debounce_count:
-                accepted, run = v, 0
-            else:
-                debounced = True
-        else:
-            accepted, run = v, 0
-
-        flags = (['stale'] if gap_stale or frozen_stale else []) + (['debounce'] if debounced else [])
-        results.append(SampleResult(t, v, accepted, flags))
-    return results
+        replayed = check_samples(tpl, rows)
+        result.sensors[tpl.name] = SensorReplay(tpl.name, replayed, summarize(replayed))
+    result.without_samples = [t.name for t in templates if t.name not in result.sensors]
+    return result
 
 
 def load_samples_csv(path: str | Path) -> Dict[str, List[Sample]]:
@@ -104,7 +93,7 @@ def parse_inline_samples(text: str) -> List[Sample]:
 
 
 def summarize(results: List[SampleResult]) -> Dict[str, int]:
-    counts = {flag: 0 for flag in ('corrupt', 'stale', 'debounce')}
+    counts = {flag: 0 for flag in FLAGS}
     for r in results:
         for flag in r.flags:
             counts[flag] += 1

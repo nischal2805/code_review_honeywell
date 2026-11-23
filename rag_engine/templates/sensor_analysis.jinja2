@@ -2,78 +2,119 @@
 Generated: {{ report_date }}
 DAL Level: {{ dal_level }}
 
-{% macro entries(title, items) %}
-- {{ title }}:
-{% for e in items %}
-  - {{ e }}
-{% else %}
-  - none
-{% endfor %}
-{% endmacro %}
-## Summary
+{% set counts = result.status_counts() %}
+{% set mapped = findings | selectattr('status', 'equalto', 'found') | list %}
+## A. Overall Summary
 
-| Sensor | Class | Corrupt | Stale | Debounce |
-|--------|-------|---------|-------|----------|
+| Item | Count |
+|------|-------|
+| Sensor classes discovered in the code | {{ result.discovered_sensor_classes | length }} |
+| YAML sensor configurations loaded | {{ findings | length }} |
+| Configurations mapped to a C++ class | {{ mapped | length }} |
+| Sensor classes without a YAML configuration | {{ unmapped | length }} |
+| YAML configurations not mapped (unused or ambiguous) | {{ result.unused_configs | length }} |
+| Checks implemented | {{ counts.get('implemented', 0) }} |
+| Checks missing | {{ counts.get('missing', 0) }} |
+| Configuration-to-code mismatches | {{ counts.get('mismatch', 0) }} |
+| Checks inconclusive | {{ counts.get('inconclusive', 0) }} |
+| Checks disabled by configuration | {{ counts.get('disabled', 0) }} |
+| Checks enabled without a configured value | {{ counts.get('not_configured', 0) }} |
+
+## B. Sensor Inventory
+
+| Sensor | Category | C++ class | Mapping | Acquisition | Processing | Validation | Consumers |
+|--------|----------|-----------|---------|-------------|------------|------------|-----------|
 {% for f in findings %}
-{% if f.checks %}
-| {{ f.template.name }} | {{ f.class_name }} | {{ f.checks.corrupt.status }} | {{ f.checks.stale.status }} | {{ f.checks.debounce.status }} |
-{% else %}
-| {{ f.template.name }} | not found | - | - | - |
-{% endif %}
+| {{ f.template.name|md_cell }} | {{ f.template.category or '-' }} | {{ (f.class_name or '-')|md_cell }} | {{ f.status }} | {{ (f.sources | map('md_cell') | join('; ')) or '-' }} | {{ (f.processors | map('md_cell') | join('; ')) or '-' }} | {{ (f.validators | map('md_cell') | join('; ')) or '-' }} | {{ (f.consumers | map('md_cell') | join('; ')) or '-' }} |
 {% endfor %}
 
 {% for f in findings %}
-## Sensor: {{ f.template.name }}
-{% if f.template.type or f.template.unit %}
-- Type: {{ f.template.type or '-' }}, unit: {{ f.template.unit or '-' }}
-{% endif %}
-{% if f.status == 'not_found' %}
-- Class: not found in the parsed code (looked for `{{ f.template.class_name or f.template.name }}`)
-{% if f.hierarchy %}
-- Hierarchy: {{ f.hierarchy | join(' → ') }}
-{% endif %}
+### {{ f.template.name }}
+{% if f.status != 'found' %}
+- Mapping: **{{ f.status }}** — {{ f.note }}
 {% else %}
-- Class: `{{ f.class_name }}` — {{ f.file_path }}:{{ f.line_number }}
-- Instantiated: {{ 'yes' if f.instantiated else 'no' }}
+- Class: `{{ f.class_name }}` — {{ f.file_path }}:{{ f.line_number }}; instantiated: {{ 'yes' if f.instantiated else 'no' }}
+- Configuration: category {{ f.template.category or '-' }}, unit {{ f.template.unit or '-' }}{% if f.template.attributes %}, attributes {{ f.template.attributes }}{% endif %}
+
+- Constructors: {{ f.constructors | join(', ') or 'none declared' }}
 - Hierarchy: {{ f.hierarchy | join(' → ') }}
-- Data members: {{ f.data_members | join(', ') or 'none' }}
+- Data flow: {{ (f.sources | map('replace', ' (', ' @ (') | join(', ')) or 'no acquisition function' }} → {{ (f.processors | map('replace', ' (', ' @ (') | join(', ')) or 'no processing function' }} → {{ (f.validators | map('replace', ' (', ' @ (') | join(', ')) or 'no validation function' }} → {{ (f.consumers | map('replace', ' (', ' @ (') | join(', ')) or 'no consumer' }}
+{% endif %}
 
-### Data Flow
+{% endfor %}
+## C. Validation Results
 
-{{ entries('Sources (where the data is obtained)', f.sources) }}
-{{ entries('Processors (call the sources)', f.processors) }}
-{{ entries('Validators', f.validators) }}
-{{ entries('Consumers', f.consumers) }}
-### Checks
-
-| Check | Status | Expected | Found | Evidence |
-|-------|--------|----------|-------|----------|
+| Sensor | Check | YAML expectation | C++ implementation | Result | Confidence |
+|--------|-------|------------------|--------------------|--------|------------|
+{% for f in mapped %}
 {% for name, c in f.checks.items() %}
-| {{ name }} | {{ c.status }} | {{ c.expected | replace('|', '\\|') }} | {% for v in c.found %}{{ '%.10g' % v }}{{ ', ' if not loop.last }}{% else %}-{% endfor %} | {{ (c.evidence | map('replace', '|', '\\|') | join('; ')) or '-' }} |
+| {{ f.template.name|md_cell }} | {{ name }} | {{ c.configured | replace('_', ' ') }}{% if c.configured != 'disabled' %}: {{ c.expected|md_cell }}{% endif %} | {% if c.functions %}detected in {{ c.functions | map('md_cell') | join('; ') }}{% if c.found %} (limits {% for v in c.found %}{{ '%.10g' % v }}{{ ', ' if not loop.last }}{% endfor %}){% endif %}{% elif c.configured == 'enabled' %}not detected{% else %}not verified{% endif %} | {{ c.status }} | {{ c.confidence or '-' }} |
 {% endfor %}
-{% set unset = [] %}
-{% for name, c in f.checks.items() if c.status == 'not_configured' %}
-{% set _ = unset.append(name) %}
 {% endfor %}
-{% if unset %}
 
-- Not configured in the template: {{ unset | join(', ') }} (no value to check the code against)
+## D. Issues and Recommendations
+
+{% set ns = namespace(n=0) %}
+{% for f in findings %}
+{% if f.status != 'found' %}
+{% set ns.n = ns.n + 1 %}
+{{ ns.n }}. **{{ f.template.name }} — mapping {{ f.status }}.** {{ f.note }}. Recommendation: set `class_name` to the intended C++ class{% if f.status == 'not_found' %}, or add the sensor class to the code{% endif %}.
 {% endif %}
+{% for name, c in f.checks.items() if c.status in ('missing', 'mismatch', 'inconclusive', 'not_configured') %}
+{% set ns.n = ns.n + 1 %}
+{{ ns.n }}. **{{ f.template.name }} — {{ name }} {{ c.status }}.** Expected: {{ c.expected }}. Detected: {{ c.note }}
+{% for e in c.evidence[:3] %}
+   - `{{ e }}`
+{% endfor %}
+{% if c.recommendation %}
+   - Recommendation: {{ c.recommendation }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% for cls in unmapped %}
+{% set ns.n = ns.n + 1 %}
+{{ ns.n }}. **{{ cls }} — no YAML configuration.** The class looks like a sensor (derived from a sensor base, named `*Sensor`, or has a numeric read/sample/acquire method) but no configuration maps to it. Recommendation: add an entry with its approved limits, or ignore it if it is not a sensor.
+{% endfor %}
+{% if ns.n == 0 %}
+No issues found.
 {% endif %}
 
-{% endfor %}
-## Unmapped Sensor Classes
+{% if replay %}
+## CSV Replay — {{ replay.source }}
 
-Classes derived from a mapped sensor's base class, or named `*Sensor`, that no template maps to:
+The configured rules applied to the supplied samples by the generic validation engine. This shows how the
+rules treat this data; it does not show that the C++ runtime behaves the same way.
 
-{% for c in unmapped %}
-- {{ c }}
-{% else %}
-None.
+| Sensor | Samples | Corrupt | Stale | Frozen | Debounce held |
+|--------|---------|---------|-------|--------|---------------|
+{% for name, r in replay.sensors.items() %}
+| {{ name|md_cell }} | {{ r.counts.total }} | {{ r.counts.corrupt }} | {{ r.counts.stale }} | {{ r.counts.frozen }} | {{ r.counts.debounce }} |
 {% endfor %}
+{% for name, r in replay.sensors.items() %}
+{% set flagged = r.results | selectattr('flags') | list %}
+{% if flagged %}
+
+- {{ name }}: {% for s in flagged[:10] %}t={{ '%.10g' % s.timestamp_ms }} ms value={{ '%.10g' % s.value }} ({{ s.flags | join(', ') }}){{ '; ' if not loop.last }}{% endfor %}{% if flagged | length > 10 %}; … {{ flagged | length - 10 }} more{% endif %}
+
+{% endif %}
+{% endfor %}
+{% if replay.unknown_sensors %}
+- Samples for sensors with no configuration (not checked): {{ replay.unknown_sensors | join(', ') }}
+{% endif %}
+{% if replay.without_samples %}
+- Configured sensors without samples: {{ replay.without_samples | join(', ') }}
+{% endif %}
+
+{% endif %}
+## E. Analysis Limitations
+
+{% for l in result.limitations %}
+- {{ l }}
+{% endfor %}
+- These results support engineering review; they do not demonstrate DO-178C or any other certification compliance.
 
 {% if llm_narrative %}
-## AI Certification Assessment
+## AI Assessment (local LLM — explanation of the findings above)
 
 {{ llm_narrative }}
 {% endif %}

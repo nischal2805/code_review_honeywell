@@ -88,9 +88,11 @@ class ChecklistFiller:
 
     @staticmethod
     def _sensor_items(sensors: SensorAnalysisResult) -> List[ChecklistItem]:
-        unmapped = [f.template.name for f in sensors.findings if f.status != 'found']
+        unmapped = [f"{f.template.name} ({f.status})" for f in sensors.findings if f.status != 'found']
         gaps = [f"{f.template.name}.{name} ({c.status})" for f in sensors.findings
                 for name, c in f.checks.items() if c.status in ('missing', 'mismatch')]
+        unsure = [f"{f.template.name}.{name}" for f in sensors.findings
+                  for name, c in f.checks.items() if c.status == 'inconclusive']
         return [
             ChecklistItem('sensors', 'SEN-01', 'Every sensor template is mapped to a code class',
                           'PASS' if not unmapped else 'OPEN',
@@ -99,6 +101,9 @@ class ChecklistFiller:
             ChecklistItem('sensors', 'SEN-02', 'No stale/corrupt/debounce check is missing or mismatched with its template',
                           'PASS' if not gaps else 'FAIL',
                           f"{len(gaps)} check(s)" + (f": {', '.join(gaps)}" if gaps else '')),
+            ChecklistItem('sensors', 'SEN-03', 'Every enabled sensor check could be verified statically (none inconclusive)',
+                          'PASS' if not unsure else 'OPEN',
+                          f"{len(unsure)} inconclusive" + (f": {', '.join(unsure)}" if unsure else '')),
         ]
 
     @staticmethod

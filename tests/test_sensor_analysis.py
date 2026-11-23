@@ -237,8 +237,8 @@ def test_comparison_with_a_non_constant_is_not_evidence(tmp_path):
 def test_disabled_checks_are_not_required_and_unset_values_are_not_configured(tmp_path):
     f = _probe(tmp_path, PROBE, valid_min=-5.5, valid_max=10.0, corrupt_range_check=False,
                debounce_enabled=False, debounce_threshold=0.5)
-    assert f.checks['corrupt'].status == 'not_required'
-    assert f.checks['debounce'].status == 'not_required'
+    assert f.checks['corrupt'].status == 'disabled'
+    assert f.checks['debounce'].status == 'disabled'
     assert f.checks['stale'].status == 'not_configured'    # no stale threshold in the template
     assert all(c.found == [] and c.evidence == [] for c in f.checks.values())
 
@@ -273,14 +273,17 @@ def test_report_renders_hierarchy_flow_checks_and_unmapped(tmp_path, analysis):
     path = ReportGenerator(Config(output_dir=str(tmp_path))).generate_sensor_analysis(analysis, format='markdown')
     assert path.endswith('sensor_analysis.md')
     text = Path(path).read_text(encoding='utf-8')
-    assert '## Sensor: TemperatureSensor' in text
+    for section in ('## A. Overall Summary', '## B. Sensor Inventory', '## C. Validation Results',
+                    '## D. Issues and Recommendations', '## E. Analysis Limitations'):
+        assert section in text
+    assert '### TemperatureSensor' in text
     assert 'Temperature Parameter → Temperature I/O Group → TemperatureSensor → data: value, lastValue, lastUpdateMs' in text
-    assert '| Check | Status | Expected | Found | Evidence |' in text
-    assert re.search(r'\| corrupt \| implemented \| range \[-54, 54\] \|', text)
-    assert re.search(r'\| corrupt \| mismatch \| range \[0, 110000\] \|', text)
+    assert '| Sensor | Check | YAML expectation | C++ implementation | Result | Confidence |' in text
+    assert re.search(r'\| TemperatureSensor \| corrupt \| enabled: range \[-54, 54\] \| detected in .*\| implemented \| medium \|', text)
+    assert re.search(r'\| PressureSensor \| corrupt \| enabled: range \[0, 110000\] \| detected in .*\| mismatch \|', text)
     assert 'Validator::check(float)' in text and 'Display::update(float)' in text
-    assert re.search(r'## Sensor: SpeedSensor\n(?:.*\n)*?.*not found', text)
-    assert '## Unmapped Sensor Classes' in text
+    assert re.search(r'### SpeedSensor\n- Mapping: \*\*not_found\*\*', text)
+    assert '| YAML sensor configurations loaded | 4 |' in text
 
 
 def test_report_lists_unmapped_classes_and_escapes_pipes(tmp_path):
@@ -291,8 +294,9 @@ def test_report_lists_unmapped_classes_and_escapes_pipes(tmp_path):
     result = _analyze(parsed, [SensorTemplate(name='Probe', valid_min=0, valid_max=9)])
     path = ReportGenerator(Config(output_dir=str(tmp_path / 'out'))).generate_sensor_analysis(result, format='markdown')
     text = Path(path).read_text(encoding='utf-8')
-    assert '- FuelSensor' in text.split('## Unmapped Sensor Classes')[1]
-    assert r'(v \| 1) > 5' in text
+    assert '**FuelSensor — no YAML configuration.**' in text.split('## D. Issues')[1]
+    assert '(v | 1) > 5' in text.split('## D. Issues')[1]          # evidence of the range mismatch
+    assert '| Sensor classes without a YAML configuration | 1 |' in text
 
 
 def test_report_docx(tmp_path, analysis):
@@ -501,9 +505,9 @@ def test_fixture_getter_is_no_longer_a_source(findings):
 def test_report_renders_the_optional_narrative(tmp_path, analysis):
     generator = ReportGenerator(Config(output_dir=str(tmp_path)))
     plain = Path(generator.generate_sensor_analysis(analysis, format='markdown')).read_text(encoding='utf-8')
-    assert 'AI Certification Assessment' not in plain
+    assert 'AI Assessment' not in plain
     path = generator.generate_sensor_analysis(analysis, format='markdown', llm_narrative='Looks fine.')
-    assert '## AI Certification Assessment\n\nLooks fine.' in Path(path).read_text(encoding='utf-8')
+    assert '## AI Assessment (local LLM — explanation of the findings above)\n\nLooks fine.' in Path(path).read_text(encoding='utf-8')
 
 
 def test_report_distinguishes_not_configured_from_not_required(tmp_path):
@@ -514,9 +518,9 @@ def test_report_distinguishes_not_configured_from_not_required(tmp_path):
                                               debounce_enabled=False)])
     path = ReportGenerator(Config(output_dir=str(tmp_path / 'out'))).generate_sensor_analysis(result, format='markdown')
     text = Path(path).read_text(encoding='utf-8')
-    assert re.search(r'\| stale \| not_configured \| no stale threshold configured \|', text)
-    assert re.search(r'\| debounce \| not_required \| debounce disabled \|', text)
-    assert 'Not configured in the template: stale' in text
+    assert '| Probe | stale | not configured: no stale threshold configured | not verified | not_configured | - |' in text
+    assert '| Probe | debounce | disabled | not verified | disabled | - |' in text
+    assert '**Probe — stale not_configured.**' in text        # listed as an issue, with its recommendation
 
 
 # ── Final review: checks are credited per sensor ────────────────────────────────

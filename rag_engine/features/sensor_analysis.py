@@ -13,6 +13,7 @@ from rag_engine.core.ast_builder import find_nodes, get_text
 from rag_engine.core.class_hierarchy import MethodInfo, bare_type
 from rag_engine.core.graph_builder import CallGraphBuilder
 from rag_engine.features.sensor_template import SensorTemplate
+from rag_engine.features.sensor_validation import CHECKS, CheckRequirement, check_requirements
 from rag_engine.models import FunctionDef, ParseResult
 
 _READER_NAME = re.compile(r'(?i)read|sample|acquire')                        # fullmatch on a short name
@@ -23,6 +24,8 @@ _STALE_TOKENS = {'ms', 'msec', 'millis', 'us', 'usec', 'sec', 'secs', 'time', 't
                  'timeout', 'stale', 'tick', 'ticks', 'age', 'now'}
 _DEBOUNCE_TOKENS = {'debounce', 'prev', 'previous', 'last', 'delta', 'diff', 'stable'}
 _ABS_FUNCTIONS = {'abs', 'fabs', 'fabsf'}
+# return types of a reader that make its class a sensor candidate
+_NUMERIC = re.compile(r'(?:(?:unsigned|signed|long|short)\s+)*(?:float|double|int|long|short)|u?int(?:8|16|32|64)_t')
 _RELATIONAL = {'<', '<=', '>', '>='}
 # Scopes whose declarations are still file scope (include guards wrap whole headers).
 _FILE_SCOPES = {'namespace_definition', 'declaration_list', 'linkage_specification',
@@ -32,18 +35,31 @@ _COMMENT = re.compile(r'//.*|/\*.*?\*/')
 
 @dataclass
 class CheckResult:
-    # not_required: explicitly disabled in the template; not_configured: the template gives no value to check against
-    status: Literal['implemented', 'mismatch', 'missing', 'not_required', 'not_configured']
+    """YAML expectation vs. C++ implementation for one check of one sensor.
+
+    status (the verification result):
+      implemented     the code compares the sensor data against exactly the configured limits
+      mismatch        it compares, but not against (all of) the configured limits
+      missing         the data path was traced and holds no such comparison
+      inconclusive    static analysis cannot decide (limits not constant, no traceable data path, unresolved calls)
+      disabled        switched off in the YAML: absence is not a failure
+      not_configured  enabled but the YAML gives no value to check the code against"""
+    status: Literal['implemented', 'mismatch', 'missing', 'inconclusive', 'disabled', 'not_configured']
     expected: str                 # e.g. "range [-54, 54]", "threshold 500 ms"
     found: List[float] = field(default_factory=list)       # constants of the matching comparisons
     evidence: List[str] = field(default_factory=list)      # "<file>:<line> <sig_key>: <comparison text>"
+    configured: str = ''          # the YAML side: enabled / disabled / not_configured
+    functions: List[str] = field(default_factory=list)     # functions holding the comparisons, "<sig_key> (<file>:<line>)"
+    confidence: str = ''          # high / medium / low; '' when nothing was verified
+    note: str = ''                # why this status, in a sentence
+    recommendation: str = ''
 
 
 @dataclass
 class SensorFinding:
     template: SensorTemplate
     class_name: Optional[str]
-    status: Literal['found', 'not_found']
+    status: Literal['found', 'not_found', 'ambiguous']
     file_path: str = ''
     line_number: int = 0
     instantiated: bool = False
@@ -54,12 +70,29 @@ class SensorFinding:
     validators: List[str] = field(default_factory=list)
     consumers: List[str] = field(default_factory=list)
     checks: Dict[str, CheckResult] = field(default_factory=dict)    # corrupt / stale / debounce
+    constructors: List[str] = field(default_factory=list)
+    candidates: List[str] = field(default_factory=list)   # ambiguous: the competing classes or templates
+    note: str = ''                                        # why not_found / ambiguous
 
 
 @dataclass
 class SensorAnalysisResult:
     findings: List[SensorFinding]
-    unmapped_sensor_classes: List[str] = field(default_factory=list)
+    unmapped_sensor_classes: List[str] = field(default_factory=list)   # discovered, no YAML configuration
+    discovered_sensor_classes: List[str] = field(default_factory=list) # every sensor class found in the code
+    limitations: List[str] = field(default_factory=list)
+
+    @property
+    def unused_configs(self) -> List[str]:
+        """YAML configurations not (uniquely) mapped to a C++ class."""
+        return [f.template.name for f in self.findings if f.status != 'found']
+
+    def status_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for f in self.findings:
+            for c in f.checks.values():
+                counts[c.status] = counts.get(c.status, 0) + 1
+        return counts
 
 
 _Call = Tuple[str, int, Optional[str]]   # (short callee name, absolute line, receiver) as CallSite names them
@@ -83,6 +116,7 @@ class _ParamComparison:
     kind: Literal['range', 'stale', 'debounce']
     text: str
     sides: Tuple[FrozenSet[str], FrozenSet[str]]   # parameter names on the left and right operand
+    has_constant: bool = False                     # an operand is already a constant: the callee counts itself
 
 
 @dataclass
@@ -246,20 +280,69 @@ class SensorAnalyzer:
         for site in self._gb.call_sites:
             if site.call_type != 'unresolved':      # a fan-out over same-named functions resolves nothing
                 self._sites.setdefault(site.caller, {}).setdefault((site.line, site.receiver), set()).add(site.target)
-        findings = [self._analyze_template(t) for t in self._templates]
+        mapping = {t.name: self._map(t) for t in self._templates}
+        claims: Dict[str, List[str]] = {}
+        for t in self._templates:
+            cls = mapping[t.name][0]
+            if cls:
+                claims.setdefault(cls, []).append(t.name)
+        findings = []
+        for t in self._templates:
+            cls, candidates = mapping[t.name]
+            groups = [g for g in (t.parameter_group, t.io_group) if g]
+            if cls and len(claims[cls]) > 1:
+                others = [n for n in claims[cls] if n != t.name]
+                findings.append(SensorFinding(
+                    template=t, class_name=cls, status='ambiguous', hierarchy=groups, candidates=others,
+                    note=f"class {cls} is also claimed by {', '.join(others)}; no configuration was chosen"))
+            elif candidates:
+                findings.append(SensorFinding(
+                    template=t, class_name=None, status='ambiguous', hierarchy=groups, candidates=candidates,
+                    note=f"'{t.class_name or t.name}' matches several classes: {', '.join(candidates)}; "
+                         "set class_name to the qualified name"))
+            elif cls is None:
+                findings.append(SensorFinding(
+                    template=t, class_name=None, status='not_found', hierarchy=groups,
+                    note=f"no class named '{t.class_name or t.name}' in the parsed code"))
+            else:
+                findings.append(self._analyze_template(t, cls))
         unmapped = self._unmapped(findings)
+        discovered = sorted({f.class_name for f in findings if f.class_name and f.status == 'found'} | set(unmapped))
         logger.info(f"Sensor analysis: {sum(f.status == 'found' for f in findings)}/{len(findings)} "
                     f"templates matched a class, {len(unmapped)} unmapped sensor classes")
-        return SensorAnalysisResult(findings, unmapped)
+        return SensorAnalysisResult(findings, unmapped, discovered, self._limitations(findings))
+
+    def _map(self, tpl: SensorTemplate) -> Tuple[Optional[str], List[str]]:
+        """(class the template names, competing classes when the name is ambiguous)."""
+        h = self._gb.hierarchy
+        wanted = tpl.class_name or tpl.name
+        cls = h.resolve_class(wanted)
+        if cls is not None:
+            return cls, []
+        candidates = sorted(c for c in h.classes if c == wanted or c.endswith('::' + wanted))
+        return None, candidates if len(candidates) > 1 else []
+
+    def _limitations(self, findings: List[SensorFinding]) -> List[str]:
+        out = ['Static analysis only: a check counts when a comparison on the traced sensor data path uses '
+               'the configured limit; timing, scheduling and hardware behaviour at run time are not verified.',
+               'Shared validator functions are followed one call level deep; debounce confirmation counts '
+               '(debounce.count) and frozen-value detection are not verified in the code.']
+        for f in findings:
+            if f.status == 'ambiguous':
+                out.append(f'{f.template.name}: mapping unresolved — {f.note}.')
+            elif f.status == 'found' and not f.sources:
+                out.append(f'{f.template.name}: no acquisition function (read/sample/acquire, or a getter of '
+                           f'type {f.template.data_type}) was identified, so its data path could not be traced.')
+            for name, c in f.checks.items():
+                if c.status == 'inconclusive':
+                    out.append(f'{f.template.name}.{name}: {c.note}')
+        return out
 
     # ── Template -> class ───────────────────────────────────────────────────
 
-    def _analyze_template(self, tpl: SensorTemplate) -> SensorFinding:
+    def _analyze_template(self, tpl: SensorTemplate, cls: str) -> SensorFinding:
         h = self._gb.hierarchy
         groups = [g for g in (tpl.parameter_group, tpl.io_group) if g]
-        cls = h.resolve_class(tpl.class_name or tpl.name)
-        if cls is None:
-            return SensorFinding(template=tpl, class_name=None, status='not_found', hierarchy=groups)
         cdef = h.classes[cls]
         members: List[str] = []
         for c in [cls] + h.ancestors(cls):
@@ -269,6 +352,9 @@ class SensorAnalyzer:
             instantiated=cls in self._gb.instantiated_classes,
             hierarchy=groups + [cls] + ([f"data: {', '.join(members)}"] if members else []),
             data_members=members)
+        short = cls.rsplit('::', 1)[-1]
+        finding.constructors = [self._entry(k) if k in self._funcs else k for k, info in h.methods.items()
+                                if info.class_name == cls and info.short_name == short]
         self._data_flow(finding)
         return finding
 
@@ -350,30 +436,25 @@ class SensorAnalyzer:
     # ── Checks ──────────────────────────────────────────────────────────────
 
     def _checks(self, finding: SensorFinding, scope: List[str], sources: List[str]) -> Dict[str, CheckResult]:
-        tpl = finding.template
+        """Compare each check the YAML asks for (generic engine) with what the code on the data path does."""
         hits = self._hits(finding, scope, sources)
-        bounds = [b for b in (tpl.valid_min, tpl.valid_max) if b is not None]
-        low = _fmt(tpl.valid_min) if tpl.valid_min is not None else '-inf'
-        high = _fmt(tpl.valid_max) if tpl.valid_max is not None else 'inf'
-        stale, debounce = tpl.stale_threshold_ms, tpl.debounce_threshold
-
-        if not tpl.corrupt_range_check:
-            corrupt = CheckResult('not_required', 'range check disabled')
-        elif not bounds:
-            corrupt = CheckResult('not_configured', 'no valid_range configured')
-        else:
-            corrupt = self._check(hits['range'], bounds, f'range [{low}, {high}]')
-        if stale is None:
-            stale_check = CheckResult('not_configured', 'no stale threshold configured')
-        else:
-            stale_check = self._check(hits['stale'], [stale], f'threshold {_fmt(stale)} ms')
-        if not tpl.debounce_enabled:
-            debounce_check = CheckResult('not_required', 'debounce disabled')
-        elif debounce is None:
-            debounce_check = CheckResult('not_configured', 'no debounce threshold configured')
-        else:
-            debounce_check = self._check(hits['debounce'], [debounce], f'threshold {_fmt(debounce)}')
-        return {'corrupt': corrupt, 'stale': stale_check, 'debounce': debounce_check}
+        unresolved = [f'{s.caller} -> {s.target} ({s.file_path}:{s.line})' for s in self._gb.call_sites
+                      if s.caller in scope and s.call_type == 'unresolved']
+        kind = {'corrupt': 'range', 'stale': 'stale', 'debounce': 'debounce'}
+        out: Dict[str, CheckResult] = {}
+        for check in CHECKS:
+            req = check_requirements(finding.template)[check]
+            if req.state == 'disabled':
+                out[check] = CheckResult('disabled', req.expected, configured='disabled',
+                                         note='Disabled in the YAML configuration; its absence is not a failure.')
+            elif req.state == 'not_configured':
+                out[check] = CheckResult('not_configured', req.expected, configured='not_configured',
+                                         note='The YAML enables this check but gives no limit to verify the code against.',
+                                         recommendation=f'Add the approved {check} parameters to the YAML entry '
+                                                        f'of {finding.template.name}, or disable the check.')
+            else:
+                out[check] = self._check(finding, req, hits[kind[check]], sources, unresolved)
+        return out
 
     def _reaching(self, cls: str, sources: List[str]) -> Set[str]:
         """Call-site targets that run one of *sources* for *cls*: the sources themselves and the virtual
@@ -384,18 +465,19 @@ class SensorAnalyzer:
                                and h.find_method(cls, info.short_name, info.param_types) in sources}
 
     def _hits(self, finding: SensorFinding, scope: List[str],
-              sources: List[str]) -> Dict[str, List[Tuple[str, _Comparison]]]:
+              sources: List[str]) -> Dict[str, List[Tuple[str, _Comparison, bool]]]:
         """Comparisons per kind that concern *this* sensor.  Sensor data is a variable assigned from a call
         site that resolves to one of the sensor's sources, a source call written in the comparison, or the
         receiver of such a call (``temp`` in ``temp.lastMs``).  A range comparison also counts on a parameter
         and, in the sensor's own methods, on a data member.  In the sensor's own methods every stale and
-        debounce comparison counts; elsewhere it needs sensor data.  A ``for`` condition never counts."""
+        debounce comparison counts; elsewhere it needs sensor data.  A ``for`` condition never counts.
+        The flag says whether the link to the sensor data is data flow (True) or one of those name shortcuts."""
         h = self._gb.hierarchy
         cls = finding.class_name or ''
         mine = {cls, *h.ancestors(cls)}
         reach = self._reaching(cls, sources)
         data = set(finding.data_members)
-        hits: Dict[str, List[Tuple[str, _Comparison]]] = {'range': [], 'stale': [], 'debounce': []}
+        hits: Dict[str, List[Tuple[str, _Comparison, bool]]] = {'range': [], 'stale': [], 'debounce': []}
         for sig_key in scope:
             facts = self._facts_of(sig_key)
             sites = self._sites.get(sig_key, {})
@@ -411,27 +493,64 @@ class SensorAnalyzer:
             for cmp in facts.comparisons:
                 if cmp.in_for_condition:
                     continue
-                refers = bool(cmp.operands & sensor_data) or any(map(from_source, cmp.calls))
+                refers = strong = bool(cmp.operands & sensor_data) or any(map(from_source, cmp.calls))
                 if cmp.kind == 'range':
                     # shortcut: a range operand is a parameter or member by name, not by data flow from the caller.
                     refers = refers or bool(cmp.operands & ({p.name for p in self._funcs[sig_key].parameters if p.name}
                                                             | (data if own else set())))
                 elif own:
                     refers = True
-                if refers:
-                    hits[cmp.kind].append((sig_key, cmp))
+                # Without a constant a comparison only counts on a data-flow link: a name shortcut plus a
+                # run-time limit says nothing about this sensor.
+                if refers and (cmp.values or strong):
+                    hits[cmp.kind].append((sig_key, cmp, strong))
         return hits
 
-    def _check(self, hits: List[Tuple[str, _Comparison]], required: List[float], expected: str) -> CheckResult:
-        found = sorted({v for _, c in hits for v in c.values})
-        evidence = [f'{self._funcs[k].file_path}:{c.line} {k}: {c.text}' for k, c in hits]
+    def _check(self, finding: SensorFinding, req: CheckRequirement, hits: List[Tuple[str, _Comparison, bool]],
+               sources: List[str], unresolved: List[str]) -> CheckResult:
+        name = finding.template.name
+        valued = [(k, c, strong) for k, c, strong in hits if c.values]
+        found = sorted({v for _, c, _ in valued for v in c.values})
+        evidence = [f'{self._funcs[k].file_path}:{c.line} {k}: {c.text}' for k, c, _ in hits]
+        functions = [self._entry(k) for k in self._unique(k for k, _, _ in hits)]
+        result = CheckResult('missing', req.expected, found, evidence, configured='enabled', functions=functions)
+        label = {'corrupt': 'range', 'stale': 'stale-data', 'debounce': 'debounce'}[req.check]
         if not hits:
-            status = 'missing'
-        elif all(any(_close(f, r) for f in found) for r in required):
-            status = 'implemented'
+            if not sources:
+                result.status, result.confidence = 'inconclusive', 'low'
+                result.note = ('No acquisition function was identified for the class, so the sensor data path '
+                               'could not be traced.')
+                result.recommendation = 'Review manually, or give the class a read()/sample()/acquire() method.'
+            elif unresolved:
+                result.status, result.confidence = 'inconclusive', 'low'
+                result.note = (f'No {label} comparison on the traced data path, but {len(unresolved)} call(s) on it '
+                               f'could not be resolved statically ({unresolved[0]}).')
+                result.recommendation = 'Review the unresolved call(s) manually.'
+            else:
+                result.confidence = 'medium'
+                result.note = f'No {label} comparison of the sensor data was found on its traced data path.'
+                result.recommendation = (f'Add a {label} check ({req.expected}) between the acquisition '
+                                         f'({sources[0].split(" (")[0]}) and the consumers of {name}; a shared '
+                                         f'generic validator called with this sensor\'s limits is sufficient.')
+            return result
+        if not valued:
+            result.status, result.confidence = 'inconclusive', 'low'
+            result.note = (f'{label.capitalize()} comparison(s) on the sensor data were found, but their limits are '
+                           'not compile-time constants, so they cannot be compared with the YAML values.')
+            result.recommendation = 'Use named constants for the limits, or confirm the run-time values manually.'
+            return result
+        result.confidence = 'high' if any(strong for _, _, strong in valued) else 'medium'
+        absent = [v for v in req.values if not any(_close(f, v) for f in found)]
+        if not absent:
+            result.status = 'implemented'
+            result.note = f'The code compares the sensor data against {req.expected}.'
         else:
-            status = 'mismatch'
-        return CheckResult(status, expected, found, evidence)
+            result.status = 'mismatch'
+            result.note = (f"Configured {', '.join(_fmt(v) for v in absent)} not used by the code "
+                           f"(code limits: {', '.join(_fmt(v) for v in found)}).")
+            result.recommendation = ('Align the code limits with the approved configuration, or correct the YAML '
+                                     'after review.')
+        return result
 
     def _facts_of(self, sig_key: str) -> _Facts:
         if sig_key not in self._facts:
@@ -453,8 +572,8 @@ class SensorAnalyzer:
                 continue
             sides = [node.child_by_field_name(side) for side in ('left', 'right')]
             values = [_value(s, src, self._consts) for s in sides]
-            if all(v is None for v in values):
-                continue
+            # Kept even without a constant: a comparison of the sensor data against a run-time limit makes
+            # the check inconclusive (cannot be verified), not missing.
             variable = [s for s, v in zip(sides, values) if s is not None and v is None]
             found.append(_Comparison(
                 line=first_line + node.start_point[0], text=' '.join(get_text(node, src).split()),
@@ -501,11 +620,13 @@ class SensorAnalyzer:
                 operator = node.child_by_field_name('operator')
                 if operator is None or get_text(operator, src) not in _RELATIONAL:
                     continue
+                operands = (node.child_by_field_name('left'), node.child_by_field_name('right'))
                 sides = tuple(frozenset(_identifiers(n, src)) & params if n is not None else frozenset()
-                              for n in (node.child_by_field_name('left'), node.child_by_field_name('right')))
+                              for n in operands)
                 if sides[0] or sides[1]:
-                    out.append(_ParamComparison(named or _classify(node, src),
-                                                ' '.join(get_text(node, src).split()), sides))   # type: ignore[arg-type]
+                    constant = any(_value(n, src, self._consts) is not None for n in operands)
+                    out.append(_ParamComparison(named or _classify(node, src), ' '.join(get_text(node, src).split()),
+                                                sides, constant))   # type: ignore[arg-type]
         self._param_cmps[sig_key] = out
         return out
 
@@ -543,7 +664,7 @@ class SensorAnalyzer:
                             else:
                                 operands.update(_identifiers(arg, src))
                                 calls |= _calls_in(arg, src, first_line)
-                    if values:
+                    if values or ((operands or calls) and not pc.has_constant):   # no constant: inconclusive evidence
                         out.append(_Comparison(
                             line=first_line + call.start_point[0],
                             text=f"{' '.join(get_text(call, src).split())} -> {pc.text}",
@@ -603,5 +724,10 @@ class SensorAnalyzer:
     def _unmapped(self, findings: List[SensorFinding]) -> List[str]:
         classes = self._gb.hierarchy.classes
         mapped = {f.class_name for f in findings if f.class_name}
-        candidates = set().union(*self._families) | {c for c in classes if c.rsplit('::', 1)[-1].endswith('Sensor')}
+        named = {c for c in classes if c.rsplit('::', 1)[-1].endswith('Sensor')}
+        derived = {d for c in classes if 'sensor' in c.rsplit('::', 1)[-1].lower() for d in self._gb.hierarchy.descendants(c)}
+        readers = {self._gb.hierarchy.methods[k].class_name for k, fn in self._funcs.items()
+                   if k in self._gb.hierarchy.methods and _READER_NAME.fullmatch(fn.name.rsplit('::', 1)[-1])
+                   and _NUMERIC.fullmatch(bare_type(fn.return_type) or '')}
+        candidates = set().union(*self._families) | named | derived | readers
         return sorted(c for c in candidates - mapped if not self._is_abstract(c))

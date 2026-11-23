@@ -25,7 +25,7 @@ PAGES = {
 FLAT = {name: fn for group in PAGES.values() for name, fn in group.items()}
 
 DEFAULTS = {'codebase': '', 'base_build': '', 'lru_docs': '', 'config_path': 'config.yaml', 'dal': 'B',
-            'out_fmt': 'markdown', 'semantic': False, 'standards_path': '', 'sensor_path': '', 'disp_path': ''}
+            'out_fmt': 'markdown', 'semantic': False, 'standards_path': '', 'sensor_path': '', 'samples_path': '', 'disp_path': ''}
 
 
 def init_state() -> None:

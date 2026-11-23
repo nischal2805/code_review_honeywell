@@ -10,6 +10,7 @@ from rag_engine.features.function_effect import FunctionEffect
 from rag_engine.features.dead_code_detector import DeadCodeReport
 from rag_engine.features.standards_validator import ComplianceReport
 from rag_engine.features.sensor_analysis import SensorAnalysisResult
+from rag_engine.features.sensor_data_checker import ReplayResult
 from rag_engine.features.virtual_analysis import VirtualAnalysisResult
 from rag_engine.reporting.output_formatter import markdown_to_docx, write_text_file
 
@@ -28,7 +29,8 @@ class ReportGenerator:
                      dead: DeadCodeReport, standards: ComplianceReport,
                      format: _FORMAT = 'docx',
                      llm_narratives: Optional[Dict[str, str]] = None,
-                     sensors: Optional[SensorAnalysisResult] = None) -> List[str]:
+                     sensors: Optional[SensorAnalysisResult] = None,
+                     replay: Optional[ReplayResult] = None) -> List[str]:
         n = llm_narratives or {}
         paths = [
             self.generate_virtual_analysis(virtual, format, n.get('virtual')),
@@ -37,7 +39,7 @@ class ReportGenerator:
             self.generate_standards(standards, format, n.get('standards')),
         ]
         if sensors is not None:
-            paths.append(self.generate_sensor_analysis(sensors, format, n.get('sensors')))
+            paths.append(self.generate_sensor_analysis(sensors, format, n.get('sensors'), replay))
         return paths
 
     def generate_virtual_analysis(self, result: VirtualAnalysisResult, format: _FORMAT = 'docx',
@@ -115,12 +117,14 @@ class ReportGenerator:
         return self._save('standards_report', md, format)
 
     def generate_sensor_analysis(self, result: SensorAnalysisResult, format: _FORMAT = 'docx',
-                                  llm_narrative: Optional[str] = None) -> str:
+                                  llm_narrative: Optional[str] = None, replay: Optional[ReplayResult] = None) -> str:
         md = render('sensor_analysis.jinja2', {
             'report_date': date.today().isoformat(),
             'dal_level': self._cfg.dal_level,
+            'result': result,
             'findings': result.findings,
             'unmapped': result.unmapped_sensor_classes,
+            'replay': replay,
             'llm_narrative': llm_narrative,
         })
         return self._save('sensor_analysis', md, format)

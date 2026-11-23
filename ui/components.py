@@ -10,9 +10,9 @@ import streamlit as st
 from ui.styles import CSS
 
 _BADGE = {
-    'ok': ('b-ok', ('implemented', 'pass', 'found', 'completed', 'done', 'low', 'closed', 'confirmed_dead', 'false_positive',
+    'ok': ('b-ok', ('implemented', 'disabled', 'pass', 'found', 'completed', 'done', 'low', 'closed', 'confirmed_dead', 'false_positive',
                     'deactivated', 'unchanged', 'ready', 'yes')),
-    'warn': ('b-warn', ('mismatch', 'medium', 'minor', 'open', 'inconclusive', 'modified', 'major', 'running', 'warning',
+    'warn': ('b-warn', ('mismatch', 'ambiguous', 'not_configured', 'medium', 'minor', 'open', 'inconclusive', 'modified', 'major', 'running', 'warning',
                         'investigate')),
     'err': ('b-err', ('missing', 'fail', 'not_found', 'failed', 'high', 'critical', 'error', 'removed', 'no')),
     'info': ('b-info', ('added', 'info', 'idle')),

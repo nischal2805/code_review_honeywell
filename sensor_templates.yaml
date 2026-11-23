@@ -4,14 +4,19 @@
 #
 # Per sensor:
 #   name                  template name; also the C++ class to match unless class_name is set
-#   type, data_type, unit descriptive metadata
+#   category              sensor category: temperature, pressure, voltage, current, position, speed,
+#                         altitude, humidity, ... (older files may say `type:`; same field)
+#   data_type, unit       descriptive metadata
+#   attributes            optional free-form mapping for later phases (installation location,
+#                         subsystem, ...); reported, not used by any check
 #   class_name            C++ class to match ('' = use name)
 #   parameter_group       top of the hierarchy: Parameter Group -> I/O Group -> Sensor -> Data
 #   io_group              second level of the hierarchy
 #   valid_range           {min, max}  corrupt check: values outside are corrupt (min < max)
 #   sampling_interval_ms  expected update period
-#   stale                 {threshold_ms, detect_frozen}  no update / unchanged value longer than
-#                         threshold_ms is stale
+#   stale                 {threshold_ms, detect_frozen}  no update for longer than threshold_ms is
+#                         stale; detect_frozen adds a separate 'frozen' finding when updates arrive
+#                         but the value has not changed for longer than threshold_ms (replay only)
 #   debounce              {enabled, threshold, count}  jumps larger than threshold are flagged
 #                         until `count` consecutive samples confirm the new value (count >= 1)
 #   corrupt               {range_check}  enable/disable the valid_range check
@@ -19,6 +24,9 @@
 # inline (`v > TEMP_MAX`) or through shared validators written once for all sensors
 # (`inRange(raw, AIRSPEED_MIN, AIRSPEED_MAX)`): the constants passed at the call site are compared with
 # this sensor's valid_range / stale / debounce values.
+# Each sensor has its own limits: two sensors of one category never share limits implicitly.
+# A check that is disabled (enabled: false / range_check: false) is reported as 'disabled', not missing.
+# The values below are illustrative only, not approved sensor limits.
 # `defaults:` is deep-merged into every sensor; sensor keys win. A single sensor may instead be
 # given as a top-level `sensor:` mapping.
 defaults:
@@ -29,7 +37,7 @@ defaults:
 
 sensors:
   - name: TemperatureSensor
-    type: temperature
+    category: temperature
     unit: Celsius
     parameter_group: Temperature Parameter
     io_group: Temperature I/O Group
@@ -39,7 +47,7 @@ sensors:
     debounce: {threshold: 2.0}
 
   - name: PressureSensor
-    type: pressure
+    category: pressure
     unit: Pascal
     parameter_group: Pressure Parameter
     io_group: Pressure I/O Group
@@ -49,7 +57,7 @@ sensors:
     debounce: {threshold: 500.0}
 
   - name: AltitudeSensor
-    type: altitude
+    category: altitude
     unit: Feet
     parameter_group: Altitude Parameter
     io_group: Altitude I/O Group
@@ -59,7 +67,7 @@ sensors:
     debounce: {threshold: 50.0}
 
   - name: SpeedSensor
-    type: speed
+    category: speed
     unit: Knots
     parameter_group: Speed Parameter
     io_group: Speed I/O Group

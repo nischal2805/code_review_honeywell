@@ -22,12 +22,12 @@ VECTOR = [
     (400, 25.2, 25.2, []),
     (500, 25.2, 25.2, []),
     (600, 25.2, 25.2, []),
-    (700, 25.2, 25.2, ['stale']),
-    (800, 25.2, 25.2, ['stale']),
+    (700, 25.2, 25.2, ['frozen']),     # updates keep arriving, value unchanged > 500 ms: frozen, not stale
+    (800, 25.2, 25.2, ['frozen']),
     (900, 30.0, 25.2, ['debounce']),
     (1000, 30.1, 25.2, ['debounce']),
     (1100, 30.0, 30.0, []),
-    (1800, 30.0, 30.0, ['stale']),
+    (1800, 30.0, 30.0, ['stale', 'frozen']),   # 700 ms gap since the last update: stale
 ]
 
 
@@ -59,7 +59,7 @@ def test_pressure_second_row_corrupt(templates, samples):
 
 def test_summarize(templates, samples):
     results = check_samples(templates['TemperatureSensor'], samples['TemperatureSensor'])
-    assert summarize(results) == {'corrupt': 1, 'stale': 3, 'debounce': 2, 'total': 13}
+    assert summarize(results) == {'corrupt': 1, 'stale': 1, 'frozen': 3, 'debounce': 2, 'total': 13}
 
 
 def test_samples_sorted_by_timestamp(templates):

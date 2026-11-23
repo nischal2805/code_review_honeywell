@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -12,8 +12,8 @@ from rag_engine.knowledge_base.standards_profile import deep_merge
 
 @dataclass
 class SensorTemplate:
-    name: str
-    type: str = ''
+    name: str                             # unique configuration identity
+    type: str = ''                        # the sensor category (YAML ``category:``, or the older ``type:``)
     data_type: str = 'float'
     unit: str = ''
     class_name: str = ''                  # C++ class to match; '' means use name
@@ -28,6 +28,13 @@ class SensorTemplate:
     debounce_threshold: Optional[float] = None
     debounce_count: int = 3
     corrupt_range_check: bool = True
+    # Free-form metadata for later phases (installation location, subsystem, part number, ...); carried
+    # through to the reports but not used by any check.
+    attributes: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def category(self) -> str:
+        return self.type
 
 
 def _num(sensor: str, label: str, value: Any) -> float:
@@ -65,7 +72,7 @@ _PLAIN_STR = ('type', 'data_type', 'unit', 'class_name', 'parameter_group', 'io_
 _SECTION_KEYS: Dict[str, set] = {}
 for _section, _key, _ in _NESTED.values():
     _SECTION_KEYS.setdefault(_section, set()).add(_key)
-_SENSOR_KEYS = {'name', 'sampling_interval_ms', *_PLAIN_STR, *_SECTION_KEYS}
+_SENSOR_KEYS = {'name', 'category', 'attributes', 'sampling_interval_ms', *_PLAIN_STR, *_SECTION_KEYS}
 _FILE_KEYS = {'defaults', 'sensors', 'sensor'}
 
 
@@ -96,6 +103,18 @@ def _build(raw: Any, defaults: Dict[str, Any]) -> SensorTemplate:
     for key in _PLAIN_STR:
         if raw.get(key) is not None:
             kwargs[key] = str(raw[key])
+    if raw.get('category') is not None:
+        category = str(raw['category'])
+        if 'type' in kwargs and kwargs['type'].lower() != category.lower():
+            raise ValueError(f"Sensor '{name}': category {category!r} and type {kwargs['type']!r} disagree "
+                             "(they are the same field; give one)")
+        kwargs['type'] = category
+    if 'type' in kwargs:
+        kwargs['type'] = kwargs['type'].strip().lower()
+    if raw.get('attributes') is not None:
+        if not isinstance(raw['attributes'], dict):
+            raise ValueError(f"Sensor '{name}': attributes must be a mapping, got {raw['attributes']!r}")
+        kwargs['attributes'] = dict(raw['attributes'])
     if raw.get('sampling_interval_ms') is not None:
         kwargs['sampling_interval_ms'] = _num(name, 'sampling_interval_ms', raw['sampling_interval_ms'])
     for field_name, (section, key, convert) in _NESTED.items():

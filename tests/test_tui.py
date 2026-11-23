@@ -216,14 +216,14 @@ def test_sample_tester_flags_an_out_of_range_inline_sample(results):
     columns, rows, summary = _check_inline(results, 'TemperatureSensor', '0:25.0, 100:80.0')
     assert columns == ['t (ms)', 'Value', 'Accepted', 'Flags']
     assert rows == [['0', '25', '25', 'ok'], ['100', '80', '25', 'corrupt']]
-    assert summary == ('2 samples: corrupt 1, stale 0, debounce 0\n'
+    assert summary == ('2 samples: corrupt 1, stale 0, frozen 0, debounce 0\n'
                        'showing 2 of 2 samples (all flagged rows included)')
 
 
 def test_sample_tester_reads_a_csv_for_the_selected_sensor(results):
     _, rows, summary = _check_inline(results, 'TemperatureSensor', str(SAMPLES_CSV))
     assert len(rows) == 13 and rows[2][3] == 'corrupt' and rows[9][3] == 'debounce'
-    assert summary == ('13 samples: corrupt 1, stale 3, debounce 2\n'
+    assert summary == ('13 samples: corrupt 1, stale 1, frozen 3, debounce 2\n'
                        'showing 13 of 13 samples (all flagged rows included)')
 
 
@@ -271,7 +271,7 @@ def test_sample_tester_shows_every_flagged_row_and_the_first_200(results, tmp_pa
     assert len(rows) == 202
     assert [r[0] for r in rows[-2:]] == ['70000', '90000'] and [r[3] for r in rows[-2:]] == ['corrupt', 'corrupt']
     assert all(r[3] == 'ok' for r in rows[:200])
-    assert summary == ('1000 samples: corrupt 2, stale 0, debounce 0\n'
+    assert summary == ('1000 samples: corrupt 2, stale 0, frozen 0, debounce 0\n'
                        'showing 202 of 1000 samples (all flagged rows included)')
 
 

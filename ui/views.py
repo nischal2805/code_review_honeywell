@@ -45,7 +45,7 @@ def build_config() -> Config:
     cfg = load_config(k['config_path'] or 'config.yaml')
     cfg.dal_level = k['dal']
     for attr, key in (('standards_file', 'standards_path'), ('sensor_templates_file', 'sensor_path'),
-                      ('dead_code_dispositions', 'disp_path')):
+                      ('sensor_samples_file', 'samples_path'), ('dead_code_dispositions', 'disp_path')):
         if k[key]:
             setattr(cfg, attr, str(Path(k[key]).expanduser().resolve()))
     return cfg
@@ -126,8 +126,8 @@ def _sensor_card(r) -> tuple:
     if r.sensors is None:
         return ('Sensors', 'n/a', 'no sensor YAML configured')
     found = [f for f in r.sensors.findings if f.status == 'found']
-    bad = [f for f in found if any(ch.status in ('missing', 'mismatch') for ch in f.checks.values())]
-    return ('Sensors mapped', f"{len(found)}/{len(r.sensors.findings)}", f"{len(bad)} with check gaps",
+    bad = [f for f in found if any(ch.status in ('missing', 'mismatch', 'inconclusive') for ch in f.checks.values())]
+    return ('Sensors mapped', f"{len(found)}/{len(r.sensors.findings)}", f"{len(bad)} with check gaps or inconclusive",
             'warn' if bad or len(found) < len(r.sensors.findings) else 'ok')
 
 
@@ -194,6 +194,9 @@ def configuration() -> None:
     if fallback:
         st.caption(f'Using `sensor_templates_file` from the config file: `{fallback}`')
     _sensor_yaml_view(k['sensor_path'] or fallback)
+    _upload('Upload sensor samples CSV (optional: sensor,timestamp_ms,value)', ['csv'], 'up_samples', 'samples_path')
+    _path_input('Sensor samples CSV path (optional)', 'samples_path',
+                'Replayed through the same generic rules; shows how the rules treat the data, not the C++ runtime.')
 
     c.section('Validate configuration')
     if st.button('Validate configuration', type='primary'):
@@ -224,7 +227,7 @@ def _sensor_yaml_view(path: str) -> None:
         st.error(f'Invalid sensor configuration: {exc}')
         return
     st.success(f'Sensor YAML valid — {len(templates)} sensor(s) in `{Path(path).name}`')
-    rows = [{'Sensor': t.name, 'Type': t.type, 'Unit': t.unit, 'C++ class': t.class_name or t.name,
+    rows = [{'Sensor': t.name, 'Category': t.category, 'Unit': t.unit, 'C++ class': t.class_name or t.name,
              'Range': _range(t), 'Stale ms': t.stale_threshold_ms, 'Frozen detect': t.stale_detect_frozen,
              'Debounce': (f'on, thr {t.debounce_threshold}, n={t.debounce_count}' if t.debounce_enabled else 'off'),
              'Range check': 'on' if t.corrupt_range_check else 'off'} for t in templates]
@@ -496,16 +499,23 @@ def sensors() -> None:
         return
     fs = r.sensors.findings
     found = [f for f in fs if f.status == 'found']
-    gaps = [f for f in found if any(ch.status in ('missing', 'mismatch') for ch in f.checks.values())]
-    c.metric_row([('Configured', len(fs)), ('Mapped to C++', len(found), '', 'ok' if len(found) == len(fs) else 'warn'),
-                  ('Unmapped', len(fs) - len(found), '', 'err' if len(fs) > len(found) else 'ok'),
-                  ('Check gaps', len(gaps), 'missing or mismatch', 'warn' if gaps else 'ok'),
-                  ('Extra sensor classes', len(r.sensors.unmapped_sensor_classes), 'not in the YAML')])
-    t_inv, t_det, t_flow, t_cfg = st.tabs(['Inventory', 'Sensor details', 'Data flow', 'YAML configuration'])
+    n = r.sensors.status_counts()
+    c.metric_row([('Discovered in code', len(r.sensors.discovered_sensor_classes)), ('YAML configs', len(fs)),
+                  ('Mapped', len(found), '', 'ok' if len(found) == len(fs) else 'warn'),
+                  ('Unused / ambiguous configs', len(r.sensors.unused_configs), '', 'err' if r.sensors.unused_configs else 'ok'),
+                  ('Classes without YAML', len(r.sensors.unmapped_sensor_classes))])
+    c.metric_row([('Implemented', n.get('implemented', 0), '', 'ok'),
+                  ('Missing', n.get('missing', 0), '', 'err' if n.get('missing') else 'ok'),
+                  ('Mismatch', n.get('mismatch', 0), '', 'warn' if n.get('mismatch') else 'ok'),
+                  ('Inconclusive', n.get('inconclusive', 0), '', 'warn' if n.get('inconclusive') else 'ok'),
+                  ('Disabled / not configured', f"{n.get('disabled', 0)} / {n.get('not_configured', 0)}")])
+    t_inv, t_det, t_flow, t_replay, t_cfg = st.tabs(['Inventory', 'Sensor details', 'Data flow', 'CSV replay',
+                                                     'YAML configuration'])
     with t_inv:
         c.data_table([_sensor_row(f) for f in fs], 'No sensors configured.')
         if r.sensors.unmapped_sensor_classes:
-            c.evidence('Sensor-like classes not covered by the YAML', r.sensors.unmapped_sensor_classes)
+            c.evidence('Sensor classes discovered without a YAML configuration', r.sensors.unmapped_sensor_classes)
+        c.evidence('Analysis limitations', r.sensors.limitations)
     with t_det:
         if not fs:
             st.caption('No sensors configured.')
@@ -518,14 +528,36 @@ def sensors() -> None:
                 _sensor_flow(f)
         if not found:
             st.caption('No sensor was mapped to a class, so there is no data flow to show.')
+    with t_replay:
+        _replay_view(r.sensor_replay)
     with t_cfg:
         used = run_state().cfg.sensor_templates_file if run_state().cfg else ''
         st.caption(f'Configuration used by the last run: `{used}`')
         _sensor_yaml_view(used)
 
 
+def _replay_view(replay) -> None:
+    if replay is None:
+        st.caption('No CSV replay: set a sensor samples CSV under Project Configuration and re-run.')
+        return
+    st.caption(f'Replay of `{replay.source}` through the generic validation engine. It shows how the configured '
+               'rules treat these samples; it does not prove the C++ runtime behaves the same way.')
+    c.data_table([{'Sensor': name, **x.counts} for name, x in replay.sensors.items()], 'No sensor in the CSV has a configuration.')
+    for name, x in replay.sensors.items():
+        flagged = [s for s in x.results if s.flags]
+        if flagged:
+            with st.expander(f'{name}: {len(flagged)} flagged sample(s)'):
+                c.data_table([{'t (ms)': s.timestamp_ms, 'Value': s.value, 'Accepted': s.accepted_value,
+                               'Flags': ', '.join(s.flags)} for s in flagged])
+    if replay.unknown_sensors:
+        st.warning('Samples without a configuration (not checked): ' + ', '.join(replay.unknown_sensors))
+    if replay.without_samples:
+        st.caption('Configured sensors without samples: ' + ', '.join(replay.without_samples))
+
+
 def _sensor_row(f) -> Dict[str, Any]:
-    row = {'Sensor': f.template.name, 'C++ class': f.class_name or '—', 'Mapping': f.status,
+    row = {'Sensor': f.template.name, 'Category': f.template.category or '—', 'C++ class': f.class_name or '—',
+           'Mapping': f.status,
            'Instantiated': 'yes' if f.instantiated else 'no'}
     for ch in CHECKS:
         row[ch.title()] = f.checks[ch].status if ch in f.checks else '—'
@@ -537,13 +569,22 @@ def _sensor_detail(f) -> None:
     st.markdown(f"{c.badge(f.status)} class `{f.class_name or '—'}` · `{f.file_path}:{f.line_number}`" if f.file_path
                 else f"{c.badge(f.status)} class `{f.class_name or '—'}`", unsafe_allow_html=True)
     st.json({k: v for k, v in asdict(t).items() if v not in ('', None)}, expanded=False)
-    if f.status == 'not_found':
-        st.warning('No C++ class matched this template, so no checks could be evaluated.')
+    if f.status != 'found':
+        st.warning(f'Mapping {f.status.replace("_", " ")}: {f.note}. No checks could be evaluated.')
         return
+    if f.constructors:
+        st.caption('Constructors: ' + ', '.join(f.constructors))
     for name, ch in f.checks.items():
-        st.markdown(f"**{name.title()}** {c.badge(ch.status)} — expected: `{ch.expected}`"
-                    + (f" · found constants: `{ch.found}`" if ch.found else ''), unsafe_allow_html=True)
-        c.evidence(f'{name.title()} evidence', ch.evidence)
+        st.markdown(f"**{name.title()}** {c.badge(ch.status)}"
+                    + (f" {c.badge('confidence ' + ch.confidence, 'info')}" if ch.confidence else '')
+                    + f" — YAML: `{ch.expected}`" + (f" · code limits: `{', '.join(f'{v:g}' for v in ch.found)}`" if ch.found else ''),
+                    unsafe_allow_html=True)
+        if ch.note:
+            st.caption(ch.note)
+        if ch.recommendation:
+            st.info(f'Recommendation: {ch.recommendation}')
+        if ch.functions or ch.evidence:
+            c.evidence(f'{name.title()} evidence', ch.functions + ch.evidence)
 
 
 def _sensor_flow(f) -> None:
@@ -573,7 +614,11 @@ def assistant() -> None:
                (f' Local LLM ({cfg.ollama_model}) adds explanations.' if llm else
                 ' The local LLM is unavailable or disabled, so only deterministic answers are given.'))
     with st.expander('Examples'):
-        st.markdown('- what validation checks are applied to TemperatureSensor\n'
+        st.markdown('- which sensors were discovered\n- which sensors have missing checks\n'
+                    '- is the stale check implemented for TemperatureSensor\n'
+                    '- what is the data flow of TemperatureSensor\n- why is PressureSensor inconclusive\n'
+                    '- what is the valid range of PressureSensor\n- what improvements are needed for AltitudeSensor\n'
+                    '- what validation checks are applied to TemperatureSensor\n'
                     '- what is the inheritance of Sensor\n'
                     '- what are the virtual functions implemented by TemperatureSensor\n'
                     '- what is the compliance score\n- how many critical violations\n'

@@ -42,6 +42,8 @@ _HELP = ("I can answer questions about your analysis results.\nTry:\n"
          "  'what are the virtual functions implemented by <Class>'\n"
          "  'what components are affected if <method> changes'\n"
          "  'what validation checks are applied to <Sensor>'\n"
+         "  'is the stale check implemented for <Sensor>' / 'why is <Sensor> inconclusive'\n"
+         "  'which sensors have missing checks' / 'what is the data flow of <Sensor>'\n"
          "  'what is the inheritance of <Class>'")
 
 
@@ -134,22 +136,206 @@ def _effect_of_method(q: str, results: AnalysisResults) -> Optional[str]:
     return '\n\n'.join(format_effect(e) for e in effects)
 
 
+def _check_line(name: str, c) -> str:
+    found = f"; code limits {', '.join(f'{v:g}' for v in c.found)}" if c.found else ''
+    conf = f", confidence {c.confidence}" if c.confidence else ''
+    return f"  {name}: {c.status}{conf} (YAML: {c.expected}{found})"
+
+
 def sensor_check_text(finding: SensorFinding) -> str:
-    """Check statuses and data flow of one sensor (R3), as plain text."""
+    """Mapping, configuration, check results and data flow of one sensor (R3), as plain text."""
     tpl = finding.template
     if finding.status != 'found':
-        return f"Sensor {tpl.name}: no code class found for this template."
-    lines = [f"Sensor {tpl.name} (class {finding.class_name}, {finding.file_path}:{finding.line_number})",
+        return (f"Sensor {tpl.name}: mapping {finding.status.replace('_', ' ')} — {finding.note or 'no code class found'}."
+                " No check could be verified.")
+    lines = [f"Sensor {tpl.name} (category {tpl.category or 'not given'}; class {finding.class_name}, "
+             f"{finding.file_path}:{finding.line_number})",
              f"Hierarchy: {' -> '.join(finding.hierarchy)}",
-             "Checks applied:"]
+             "Checks (YAML expectation vs. C++ implementation, static analysis):"]
     for name, c in finding.checks.items():
-        found = f"; found {', '.join(f'{v:g}' for v in c.found)}" if c.found else ''
-        lines.append(f"  {name}: {c.status} (expected {c.expected}{found})")
+        lines.append(_check_line(name, c))
         lines += [f"    {e}" for e in c.evidence]
+        if c.status not in ('implemented',) and c.note:
+            lines.append(f"    Why: {c.note}")
     for title, items in (('Sources', finding.sources), ('Processors', finding.processors),
                          ('Validators', finding.validators), ('Consumers', finding.consumers)):
         lines.append(f"{title}: {', '.join(items) or 'none'}")
     return '\n'.join(lines)
+
+
+_SENSOR_INTENTS = [   # (keywords, renderer) in priority order; the first whose keyword occurs wins
+    (('why', 'inconclusive', 'explain'), lambda f, r: _sensor_why(f)),
+    (('improve', 'recommend', 'fix', 'should be done', 'what should'), lambda f, r: _sensor_recommendations(f)),
+    (('replay', 'csv', 'sample'), lambda f, r: _sensor_replay(f, r)),
+    (('data flow', 'data-flow', 'dataflow', 'flow', 'path'), lambda f, r: _sensor_flow(f)),
+    (('match', 'consistent', 'differ', 'agree'), lambda f, r: _sensor_match(f)),
+    (('stale',), lambda f, r: _sensor_check(f, 'stale')),
+    (('debounce',), lambda f, r: _sensor_check(f, 'debounce')),
+    (('implemented', 'range check', 'corrupt'), lambda f, r: _sensor_check(f, 'corrupt')),
+    (('checks', 'checked', 'applied'), lambda f, r: sensor_check_text(f)),
+    (('valid range', 'range', 'limit', 'threshold'), lambda f, r: _sensor_config(f)),
+    (('yaml', 'configuration', 'config', 'mapped', 'mapping'), lambda f, r: _sensor_config(f)),
+    (('category', 'kind of', 'type of'), lambda f, r: f"{f.template.name}: category {f.template.category or 'not given in the YAML'}."),
+    (('acquire', 'acquisition', 'acquired', 'read', 'source', 'obtained'), lambda f, r: _sensor_list(f, 'Acquisition (sources)', f.sources)),
+    (('process',), lambda f, r: _sensor_list(f, 'Processing functions', f.processors)),
+    (('validation function', 'validator', 'validates', 'validation'), lambda f, r: _sensor_list(f, 'Validation functions', f.validators)),
+    (('consume', 'consumer', 'used by'), lambda f, r: _sensor_list(f, 'Consumers', f.consumers)),
+]
+
+
+def _unmapped_text(f: SensorFinding) -> Optional[str]:
+    if f.status == 'found':
+        return None
+    return f"{f.template.name}: mapping {f.status.replace('_', ' ')} — {f.note}. This could not be established."
+
+
+def _sensor_list(f: SensorFinding, title: str, items: List[str]) -> str:
+    return _unmapped_text(f) or (f"{title} of {f.template.name}: " + (', '.join(items) if items else
+                                 'none identified by the static analysis'))
+
+
+def _sensor_flow(f: SensorFinding) -> str:
+    if _unmapped_text(f):
+        return _unmapped_text(f)  # type: ignore[return-value]
+    return '\n'.join([f"Data flow of {f.template.name} (static analysis):"] + [
+        f"  {title}: {', '.join(items) or 'none identified'}" for title, items in (
+            ('Acquisition', f.sources), ('Processing', f.processors),
+            ('Validation', f.validators), ('Consumers', f.consumers))])
+
+
+def _sensor_config(f: SensorFinding) -> str:
+    t = f.template
+    rng = ('not configured' if t.valid_min is None and t.valid_max is None
+           else f"[{'-inf' if t.valid_min is None else f'{t.valid_min:g}'}, {'inf' if t.valid_max is None else f'{t.valid_max:g}'}]")
+    mapping = (f"mapped to C++ class {f.class_name}" if f.status == 'found'
+               else f"not mapped ({f.status.replace('_', ' ')}: {f.note})")
+    deb_thr = 'not configured' if t.debounce_threshold is None else f'{t.debounce_threshold:g}'
+    debounce = 'off' if not t.debounce_enabled else f'threshold {deb_thr}, count {t.debounce_count}'
+    return (f"YAML configuration {t.name}: {mapping}.\n"
+            f"  category {t.category or 'not given'}, unit {t.unit or 'not given'}\n"
+            f"  valid range {rng} (range check {'on' if t.corrupt_range_check else 'off'})\n"
+            f"  stale threshold {'not configured' if t.stale_threshold_ms is None else f'{t.stale_threshold_ms:g} ms'}"
+            f" (frozen-value detection {'on' if t.stale_detect_frozen else 'off'})\n"
+            f"  debounce {debounce}")
+
+
+def _sensor_check(f: SensorFinding, check: str) -> str:
+    if _unmapped_text(f):
+        return _unmapped_text(f)  # type: ignore[return-value]
+    c = f.checks[check]
+    where = f"; detected in {', '.join(c.functions)}" if c.functions else ''
+    lines = [f"{f.template.name} {check} check: {c.status}"
+             + (f" (confidence {c.confidence})" if c.confidence else '') + f". YAML: {c.expected}{where}."]
+    if c.found:
+        lines.append(f"  Code limits: {', '.join(f'{v:g}' for v in c.found)}")
+    lines += [f"  Evidence: {e}" for e in c.evidence[:4]]
+    if c.note:
+        lines.append(f"  {c.note}")
+    if c.recommendation:
+        lines.append(f"  Recommendation: {c.recommendation}")
+    return '\n'.join(lines)
+
+
+def _sensor_match(f: SensorFinding) -> str:
+    if _unmapped_text(f):
+        return _unmapped_text(f)  # type: ignore[return-value]
+    bad = [n for n, c in f.checks.items() if c.status in ('mismatch', 'missing', 'inconclusive')]
+    verdict = ('The C++ implementation matches the YAML for every enabled check.' if not bad else
+               f"Not consistent for: {', '.join(f'{n} ({f.checks[n].status})' for n in bad)}.")
+    return '\n'.join([f"{f.template.name}: {verdict}"] + [_check_line(n, c) for n, c in f.checks.items()])
+
+
+def _sensor_why(f: SensorFinding) -> str:
+    if _unmapped_text(f):
+        return _unmapped_text(f)  # type: ignore[return-value]
+    lines = [f"{f.template.name}: {n} is {c.status} — {c.note}" for n, c in f.checks.items()
+             if c.status != 'implemented' and c.note]
+    return '\n'.join(lines) or f"{f.template.name}: every enabled check is implemented."
+
+
+def _sensor_recommendations(f: SensorFinding) -> str:
+    if f.status != 'found':
+        return f"{f.template.name}: {f.note}. Recommendation: set class_name to the intended C++ class."
+    recs = [f"  {n} ({c.status}): {c.recommendation}" for n, c in f.checks.items() if c.recommendation]
+    return (f"Recommended changes for {f.template.name}:\n" + '\n'.join(recs)) if recs else \
+        f"{f.template.name}: no change is recommended by the analysis."
+
+
+def _sensor_replay(f: SensorFinding, results: AnalysisResults) -> str:
+    replay = getattr(results, 'sensor_replay', None)
+    if replay is None:
+        return "No CSV replay was run (no sensor_samples_file configured)."
+    r = replay.sensors.get(f.template.name)
+    if r is None:
+        return f"The CSV {replay.source} has no samples for {f.template.name}."
+    flagged = [x for x in r.results if x.flags][:8]
+    lines = [f"CSV replay of {f.template.name} ({replay.source}): {r.counts['total']} samples, corrupt {r.counts['corrupt']}, "
+             f"stale {r.counts['stale']}, frozen {r.counts['frozen']}, debounce {r.counts['debounce']}."]
+    lines += [f"  t={x.timestamp_ms:g} ms value={x.value:g}: {', '.join(x.flags)}" for x in flagged]
+    lines.append("  (How the configured rules treat these samples; not proof of the C++ runtime behaviour.)")
+    return '\n'.join(lines)
+
+
+def _mentioned_sensor(q: str, results: AnalysisResults) -> Optional[SensorFinding]:
+    best: Tuple[int, Optional[SensorFinding]] = (0, None)
+    for f in results.sensors.findings:  # type: ignore[union-attr]
+        for name in {f.template.name, f.template.class_name, f.class_name} - {None, ''}:
+            short = str(name).rsplit('::', 1)[-1]
+            if len(short) > best[0] and re.search(rf'\b{re.escape(short)}\b', q, re.IGNORECASE):
+                best = (len(short), f)
+    return best[1]
+
+
+def _project_sensor_answer(q: str, results: AnalysisResults) -> Optional[str]:
+    sensors = results.sensors
+    findings = sensors.findings  # type: ignore[union-attr]
+
+    def listing(statuses, title):
+        rows = [f"  {f.template.name}.{n}: {c.status} — {c.note}" for f in findings
+                for n, c in f.checks.items() if c.status in statuses]
+        return f"{title}: {len(rows)}\n" + ('\n'.join(rows) or '  none')
+    if 'inconclusive' in q:
+        return listing(('inconclusive',), 'Inconclusive sensor checks')
+    if 'mismatch' in q or 'do not match' in q or "don't match" in q:
+        return listing(('mismatch',), 'Configuration-to-code mismatches')
+    if 'missing' in q:
+        return listing(('missing',), 'Missing sensor checks')
+    if any(k in q for k in ('unmapped', 'without', 'no yaml', 'no configuration', 'unused', 'ambiguous')):
+        unused = [f"  {f.template.name}: {f.status.replace('_', ' ')} — {f.note}" for f in findings if f.status != 'found']
+        return ("Sensor classes without a YAML configuration: "
+                + (', '.join(sensors.unmapped_sensor_classes) or 'none')  # type: ignore[union-attr]
+                + "\nYAML configurations not mapped to a class:\n" + ('\n'.join(unused) or '  none'))
+    if any(k in q for k in ('replay', 'csv', 'samples')):
+        replay = getattr(results, 'sensor_replay', None)
+        if replay is None:
+            return "No CSV replay was run (no sensor_samples_file configured)."
+        return '\n'.join([f"CSV replay ({replay.source}):"] + [
+            f"  {n}: {r.counts['total']} samples, corrupt {r.counts['corrupt']}, stale {r.counts['stale']}, "
+            f"frozen {r.counts['frozen']}, debounce {r.counts['debounce']}" for n, r in replay.sensors.items()]
+            + ([f"  No configuration for: {', '.join(replay.unknown_sensors)}"] if replay.unknown_sensors else []))
+    if any(k in q for k in ('discovered', 'found', 'detected', 'list', 'which sensors', 'what sensors', 'how many sensors')):
+        rows = [f"  {f.template.name} ({f.template.category or 'no category'}): "
+                + (f"class {f.class_name}" if f.status == 'found' else f"{f.status.replace('_', ' ')}")
+                for f in findings]
+        extra = sensors.unmapped_sensor_classes  # type: ignore[union-attr]
+        return (f"Sensor classes discovered in the code: {len(sensors.discovered_sensor_classes)}; "  # type: ignore[union-attr]
+                f"YAML configurations: {len(findings)}\n" + '\n'.join(rows)
+                + (f"\n  Without YAML configuration: {', '.join(extra)}" if extra else ''))
+    return None
+
+
+def _sensor_question(q: str, results: AnalysisResults) -> Optional[str]:
+    """Sensor questions answered from the structured sensor analysis (and CSV replay) only."""
+    if results.sensors is None:
+        return None
+    f = _mentioned_sensor(q, results)
+    ql = q.lower()
+    if f is None:
+        return _project_sensor_answer(ql, results) if 'sensor' in ql else None
+    for keywords, render in _SENSOR_INTENTS:
+        if any(k in ql for k in keywords):
+            return render(f, results)
+    return sensor_check_text(f)
 
 
 def _checks_of_sensor(q: str, results: AnalysisResults) -> Optional[str]:
@@ -184,7 +370,7 @@ def _hierarchy_of_class(q: str, results: AnalysisResults) -> Optional[str]:
 
 
 _STRUCTURAL: List[Callable[[str, AnalysisResults], Optional[str]]] = [
-    _virtuals_of_class, _effect_of_method, _checks_of_sensor, _hierarchy_of_class]
+    _virtuals_of_class, _effect_of_method, _hierarchy_of_class, _sensor_question, _checks_of_sensor]
 
 
 def _structural_answer(question: str, results: AnalysisResults) -> Tuple[Optional[str], Optional[_NotFound]]:
@@ -324,6 +510,9 @@ def results_summary(results: AnalysisResults) -> str:
         checks = Counter(c.status for f in findings for c in f.checks.values())
         lines.append(f"  Sensors: {sum(f.status == 'found' for f in findings)}/{len(findings)} templates mapped; "
                      f"checks: {', '.join(f'{k}={n}' for k, n in sorted(checks.items())) or 'none'}")
+        replay = getattr(results, 'sensor_replay', None)
+        if replay is not None:
+            lines.append(f"  Sensor CSV replay: {len(replay.sensors)} sensor(s) replayed from {replay.source}")
     return '\n'.join(lines)
 
 

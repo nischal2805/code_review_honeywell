@@ -762,7 +762,7 @@ class ResultsScreen(Screen):
             rows = [sample_row(res) for res in shown]
             counts = summarize(results)
             message = (f"{counts['total']} samples: corrupt {counts['corrupt']}, stale {counts['stale']}, "
-                       f"debounce {counts['debounce']}\n"
+                       f"frozen {counts['frozen']}, debounce {counts['debounce']}\n"
                        f"showing {len(shown)} of {counts['total']} samples (all flagged rows included)")
         except ValueError as exc:   # bad input: the message names the file and line
             message = str(exc)

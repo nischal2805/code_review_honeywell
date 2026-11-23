@@ -76,6 +76,7 @@ python main.py analyze /path/to/current_build \
 | `--coding-standards-pdf` | none | Uploaded coding-standards PDF used directly by CLI validation |
 | `--output-format` | `docx` | Output format: `docx` or `markdown` |
 | `--sensor-templates PATH` (alias `--templates`) | `sensor_templates_file` | Sensor template YAML; enables the sensor report |
+| `--sensor-samples PATH` | `sensor_samples_file` | Optional CSV (`sensor,timestamp_ms,value`) replayed through the sensor rules |
 | `--semantic-search` / `--no-semantic-search` | on | Use the embedding model for coupling analysis (keyword matching without it) |
 
 Validate an uploaded PDF before analysis:
@@ -84,6 +85,28 @@ Validate an uploaded PDF before analysis:
 python main.py validate-config --coding-standards-pdf samples/coding_standards_strict.pdf
 python main.py analyze sample_codebase --coding-standards-pdf samples/coding_standards_strict.pdf --output-format markdown
 ```
+
+### Sensor analysis (R3): one generic engine, one YAML entry per sensor
+
+Each sensor is a YAML entry (`category`, `class_name`, `valid_range`, `stale`, `debounce`, `corrupt`;
+see `sensor_templates.yaml`). No sensor-specific validation code is needed:
+
+1. **Discovery and mapping:** sensor classes are found from the AST (a sensor base class, a numeric
+   `read()/sample()/acquire()`, or a `*Sensor` name) and matched to entries by `class_name`/`name`.
+   Classes without an entry, entries without a class and ambiguous matches are reported, never guessed.
+2. **Generic engine** (`features/sensor_validation.py`): the corrupt/range, stale, frozen and debounce
+   rules, written once and parameterised by each sensor's YAML.
+3. **C++ verification:** for every enabled check the analyzer traces the sensor data from its acquisition
+   through processing (including calls to shared validators such as `inRange(raw, MIN, MAX)`) and compares
+   the limits used with the YAML. Results: `implemented`, `mismatch`, `missing`, `inconclusive` (limits
+   not compile-time constants, no traceable path, unresolved calls), `disabled`, `not_configured`, each
+   with a confidence, evidence (file:line) and a recommendation.
+4. **CSV replay** (optional, `sensor_samples_file` / `--sensor-samples`): samples run through the same
+   engine. This shows how the rules treat the data, not that the C++ runtime behaves the same way.
+5. **Report** (`sensor_analysis.md|docx`): summary, inventory with data flow, validation table,
+   issues and recommendations, replay, limitations. The assistant (`ask`, UI, TUI) answers sensor
+   questions from these results, e.g. "is the stale check implemented for X", "why is X inconclusive",
+   "which sensors have missing checks".
 
 ### Web UI (Streamlit)
 
@@ -378,7 +401,8 @@ rag_engine/
 │   ├── control_flow_analyzer.py  Dead fragments and unused variables
 │   ├── sensor_template.py      R3: sensor YAML template loader
 │   ├── sensor_analysis.py      R3: corrupt / stale / debounce checks in the code
-│   ├── sensor_data_checker.py  R3: replay of recorded sensor samples
+│   ├── sensor_validation.py    R3: generic validation engine (range / stale / frozen / debounce)
+│   ├── sensor_data_checker.py  R3: CSV replay of recorded samples through the engine
 │   └── standards_validator.py  DO-178C §5.1 + MISRA C++
 ├── knowledge_base/
 │   ├── index_manager.py        FAISS index lifecycle

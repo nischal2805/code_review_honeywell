@@ -13,7 +13,7 @@ from tqdm import tqdm
 from rag_engine.config import Config, load_config
 from rag_engine.features.function_effect import FunctionEffectAnalyzer, format_effect
 from rag_engine.features.sensor_analysis import SensorFinding
-from rag_engine.features.sensor_data_checker import check_samples, load_samples_csv, summarize
+from rag_engine.features.sensor_data_checker import load_samples_csv, replay_samples
 from rag_engine.features.sensor_template import load_sensor_templates
 from rag_engine.features.virtual_analysis import format_virtual_function
 from rag_engine.llm.offline_qa import answer_question, function_names, not_found_message
@@ -68,6 +68,8 @@ def analyze(
         None, '--coding-standards-pdf', help='Uploaded coding-standards PDF used directly for validation'
     ),
     sensor_templates: Optional[str] = _TEMPLATES,
+    sensor_samples: Optional[str] = typer.Option(
+        None, '--sensor-samples', help='CSV (sensor,timestamp_ms,value) replayed through the sensor rules'),
     config: str = _CONFIG,
     output_format: str = typer.Option('docx', help='Output format: docx or markdown'),
     semantic_search: bool = typer.Option(True, '--semantic-search/--no-semantic-search',
@@ -79,6 +81,10 @@ def analyze(
     selected = _select_standards(standards_file, coding_standards_pdf)
     if selected:
         cfg.standards_file = selected
+    if sensor_samples:
+        if not Path(sensor_samples).expanduser().exists():
+            raise _fail(f"Sensor samples file not found: {sensor_samples}")
+        cfg.sensor_samples_file = str(Path(sensor_samples).expanduser().resolve())
 
     with tqdm(total=100, desc='Analysis') as bar:
         def progress(step: str, pct: int) -> None:
@@ -231,25 +237,20 @@ def sensor_check(
     if not cfg.sensor_templates_file:
         raise _fail("No sensor templates: pass --templates or set sensor_templates_file in the config")
     try:
-        by_name = {t.name: t for t in load_sensor_templates(cfg.sensor_templates_file)}
-        samples = load_samples_csv(samples_csv)
+        templates_list = load_sensor_templates(cfg.sensor_templates_file)
+        replay = replay_samples(templates_list, load_samples_csv(samples_csv), samples_csv)
     except (ValueError, OSError) as exc:
         raise _fail(f"Error: {exc}")
-    unknown = []
-    for name, rows in samples.items():
-        if name not in by_name:
-            unknown.append(name)
-            continue
-        results = check_samples(by_name[name], rows)
+    for name, sensor in replay.sensors.items():
         typer.echo(name)
-        for r in results:
+        for r in sensor.results:
             accepted = '' if r.accepted_value is None else f"  accepted={r.accepted_value:.10g}"
             typer.echo(f"  t={r.timestamp_ms:.10g} ms  value={r.value:.10g}{accepted}  {', '.join(r.flags) or 'ok'}")
-        counts = summarize(results)
-        typer.echo(f"  Summary: {counts['total']} samples, corrupt {counts['corrupt']}, "
-                   f"stale {counts['stale']}, debounce {counts['debounce']}\n")
-    if unknown:
-        raise _fail(f"No template for sensor(s) in the CSV: {', '.join(unknown)}")
+        counts = sensor.counts
+        typer.echo(f"  Summary: {counts['total']} samples, corrupt {counts['corrupt']}, stale {counts['stale']}, "
+                   f"frozen {counts['frozen']}, debounce {counts['debounce']}\n")
+    if replay.unknown_sensors:
+        raise _fail(f"No template for sensor(s) in the CSV: {', '.join(replay.unknown_sensors)}")
 
 
 @app.command()

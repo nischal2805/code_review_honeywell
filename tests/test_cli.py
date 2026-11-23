@@ -127,7 +127,7 @@ def test_sensor_check_flags_each_sample_and_summarizes(cfg_file):
     assert result.exit_code == 0, result.output
     assert 'TemperatureSensor' in result.stdout and 'PressureSensor' in result.stdout
     assert 't=200 ms  value=80  accepted=25.2  corrupt' in result.stdout
-    assert 'Summary: 13 samples, corrupt 1, stale 3, debounce 2' in result.stdout
+    assert 'Summary: 13 samples, corrupt 1, stale 1, frozen 3, debounce 2' in result.stdout
 
 
 def test_sensor_check_rejects_unknown_sensors_and_bad_csv(cfg_file, tmp_path):

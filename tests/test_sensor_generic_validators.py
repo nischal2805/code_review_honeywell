@@ -113,7 +113,7 @@ def test_each_sensor_uses_its_own_yaml_parameters(project):
     checks = _checks(_run(project))['OilTempSensor']
     assert checks['corrupt'].status == 'mismatch' and checks['corrupt'].found == [-40.0, 150.0]
     assert checks['stale'].status == 'not_configured'       # no stale threshold in its YAML entry
-    assert checks['debounce'].status == 'not_required'      # disabled in its YAML entry
+    assert checks['debounce'].status == 'disabled'      # disabled in its YAML entry
 
 
 def test_non_constant_limit_is_not_taken_as_verified(project):

@@ -13,6 +13,7 @@ from rag_engine.document_processor.doc_reader import DocReader
 from rag_engine.features.coupling_analysis import CouplingAnalyzer
 from rag_engine.features.dead_code_detector import DeadCodeDetector
 from rag_engine.features.sensor_analysis import SensorAnalyzer
+from rag_engine.features.sensor_data_checker import load_samples_csv, replay_samples
 from rag_engine.features.sensor_template import SensorTemplate, load_sensor_templates
 from rag_engine.features.standards_validator import StandardsValidator
 from rag_engine.features.virtual_analysis import VirtualAnalyzer
@@ -33,6 +34,7 @@ class AnalysisResults:
     search: Any = None
     error: Optional[str] = None
     sensors: Any = None                   # None unless cfg.sensor_templates_file is set
+    sensor_replay: Any = None             # ReplayResult; None unless cfg.sensor_samples_file is also set
     graph: Any = None                     # the built CallGraphBuilder
     parse_results: Dict[str, ParseResult] = field(default_factory=dict)
     report_paths: List[str] = field(default_factory=list)
@@ -108,6 +110,7 @@ def _narrative_tasks(cfg: Config, r: AnalysisResults) -> Dict[str, Tuple[str, st
             f"Sensor analysis: {len(found)}/{len(r.sensors.findings)} templates mapped to a class.\n"
             f"Check statuses: {[(f.template.name, {k: c.status for k, c in f.checks.items()}) for f in found]}\n"
             f"Unmapped sensor classes: {r.sensors.unmapped_sensor_classes}\n"
+            f"Check notes: {[(f.template.name, k, c.note) for f in found for k, c in f.checks.items() if c.status in ('missing', 'mismatch', 'inconclusive')][:10]}\n"
             f"Assess stale, corrupt and debounce handling for DAL {cfg.dal_level}.", 5)
     return tasks
 
@@ -125,6 +128,15 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
     r = AnalysisResults()
     # Bad templates are the cheapest mistake to report, so check them before parsing.
     templates = _load_templates(cfg.sensor_templates_file) if cfg.sensor_templates_file else None
+    samples = None
+    if cfg.sensor_samples_file:
+        if templates is None:
+            raise InputError(f"Sensor samples {cfg.sensor_samples_file}: replay needs sensor templates "
+                             "(sensor_templates_file)")
+        try:
+            samples = load_samples_csv(cfg.sensor_samples_file)
+        except (ValueError, OSError) as exc:
+            raise InputError(f"Sensor samples: {exc}") from exc
 
     step('Parsing C++ files', 5)
     reader = CodeReader(cache_dir=cfg.cache_dir)
@@ -155,6 +167,9 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
     if templates is not None:
         step('Sensor analysis', 80)
         r.sensors = SensorAnalyzer(current, gb, templates).analyze()
+        if samples is not None:
+            step('Sensor CSV replay', 82)
+            r.sensor_replay = replay_samples(templates, samples, cfg.sensor_samples_file)
 
     llm_narratives: Dict[str, str] = {}
     llm = OllamaClient(base_url=cfg.ollama_url, model=cfg.ollama_model)
@@ -174,7 +189,7 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
         step('Writing reports and checklist', 95)
         r.report_paths = ReportGenerator(cfg).generate_all(
             r.virtual, r.coupling, r.dead, r.standards, format=output_format,  # type: ignore[arg-type]
-            llm_narratives=llm_narratives, sensors=r.sensors)
+            llm_narratives=llm_narratives, sensors=r.sensors, replay=r.sensor_replay)
         r.checklist = ChecklistFiller(cfg).fill_sqa_checklist(r.virtual, r.dead, r.standards, sensors=r.sensors)
         r.report_paths.append(str(Path(cfg.output_dir) / 'sqa_checklist.md'))
     step('Done', 100)
