@@ -102,7 +102,9 @@ class ClassHierarchy:
     # ── Construction ────────────────────────────────────────────────────────
 
     def _merge_classes(self, parse_results: Dict[str, ParseResult]) -> None:
-        for result in parse_results.values():
+        # Files in path order, so a class split over several files merges the same way whatever
+        # order the directory listing gave: the first file is the base, later ones add members.
+        for _, result in sorted(parse_results.items()):
             for cdef in result.class_defs:
                 have = self.classes.get(cdef.name)
                 if have is None:
@@ -146,7 +148,7 @@ class ClassHierarchy:
                     line_number=decl.line_number, is_virtual=decl.is_virtual, is_pure=decl.is_pure,
                     is_override=decl.is_override, has_body=decl.has_body, is_static=decl.is_static))
         # Definitions the class body did not declare (member templates, parser misses).
-        for result in parse_results.values():
+        for _, result in sorted(parse_results.items()):
             for fn in result.functions:
                 if fn.class_name in self.classes and fn.sig_key not in self.methods:
                     self._add_method(MethodInfo(
