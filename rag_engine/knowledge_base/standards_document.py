@@ -276,10 +276,6 @@ def build_profile(sources: Dict[str, List[RuleSource]]) -> Dict[str, Any]:
             profile.setdefault('universal_standards', {}).setdefault('documentation', {})[name] = \
                 _strictest([i.value for i in items], 'prohibited.')
             continue
-        if rule == 'prohibited.goto':
-            profile.setdefault('universal_standards', {}).setdefault('prohibited_constructs', {})['goto'] = \
-                _strictest([i.value for i in items], rule)
-            continue
         for dal in DALS:
             values = [i.value for i in items if dal in i.dals]
             if not values:
@@ -334,9 +330,6 @@ def _table_sources(profile: Dict[str, Any], items, source: str) -> Dict[str, Lis
         for name, value in cfg.get('severities', {}).get('prohibited_constructs', {}).items():
             if f'prohibited.{name}' in _TABLE_ROW_WORDS:
                 add(f'prohibited.{name}', value, (dal,))
-    goto = profile.get('universal_standards', {}).get('prohibited_constructs', {}).get('goto')
-    if goto:
-        add('prohibited.goto', goto, DALS)
     return out
 
 

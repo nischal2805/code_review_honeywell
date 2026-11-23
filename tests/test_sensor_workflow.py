@@ -3,7 +3,6 @@ C++ verification (incl. inconclusive) -> CSV replay -> report -> question answer
 
 All limits are synthetic, illustrative values for tests, not aerospace limits."""
 import textwrap
-from pathlib import Path
 
 import pytest
 

@@ -141,6 +141,9 @@ def run_pipeline(cfg: Config, codebase: str, base_build: Optional[str] = None, l
                 cfg.reranker_model if use_semantic_search else None)
         except ValueError as exc:
             raise InputError(f"Coding standards: {exc}") from exc
+        if not standards_doc.sources and not standards_doc.structured:
+            logger.warning(f"Coding standards {Path(cfg.standards_file).name}: no checkable rule recognised; the "
+                           "built-in default limits are used (the document is still indexed for questions)")
     r.standards_doc = standards_doc
     samples = None
     if cfg.sensor_samples_file:

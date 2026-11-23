@@ -323,3 +323,11 @@ def test_real_embedder_and_cross_encoder(tmp_path):
                         cache_dir=str(tmp_path), collection='real')
     assert r.search('how long may a routine be', k=1)[0].chunk.section == '4 Size'
     assert r.search('can I use malloc', k=1)[0].chunk.section == '5 Memory'
+
+
+def test_goto_policy_follows_the_rule_table_per_dal(code, tmp_path):
+    relaxed = ROOT / 'samples' / 'coding_standards_relaxed.pdf'      # SCS-L-02: FORBIDDEN | FORBIDDEN | RESTRICTED
+    (code / 'g.cpp').write_text('// Jumps.\nvoid jumpy() {\n    goto end;\n    end: return;\n}\n')
+    severity = {dal: next(v.severity for v in _validate(code, relaxed, dal).violations if v.rule == 'DO178-GOTO')
+                for dal in 'BC'}
+    assert severity == {'B': 'CRITICAL', 'C': 'MAJOR'}

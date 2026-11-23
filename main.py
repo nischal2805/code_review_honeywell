@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 os.environ.setdefault('USE_TF', '0')
 os.environ.setdefault('USE_TORCH', '1')
-import re
 import sys
 from pathlib import Path
 from typing import Any, List, Optional

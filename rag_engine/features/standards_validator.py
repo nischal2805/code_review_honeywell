@@ -115,7 +115,8 @@ class StandardsValidator:
         return {
             **{f'complexity.{k}': v for k, v in dal_cfg.get('complexity', {}).items()},
             **{f'prohibited.{k}': v for k, v in dal_cfg.get('severities', {}).get('prohibited_constructs', {}).items()},
-            'prohibited.goto': universal.get('prohibited_constructs', {}).get('goto'),
+            'prohibited.goto': dal_cfg.get('severities', {}).get('prohibited_constructs', {}).get('goto')
+                               or universal.get('prohibited_constructs', {}).get('goto'),
             'documentation.missing_docstring': universal.get('documentation', {}).get('missing_docstring'),
             **{f'naming.{k}': v.get('convention') for k, v in self._rules.get('naming_conventions', {}).items()
                if isinstance(v, dict)},
@@ -263,7 +264,9 @@ class StandardsValidator:
         dal_cfg = dal_rules.get(self._cfg.dal_level, {}) if isinstance(dal_rules, dict) else {}
         prohibited = dal_cfg.get('severities', {}).get('prohibited_constructs', {}) if isinstance(dal_cfg, dict) else {}
         if re.search(r'\bgoto\b', body):
-            policy = universal.get('prohibited_constructs', {}).get('goto', 'FORBIDDEN') if isinstance(universal, dict) else 'FORBIDDEN'
+            # a per-level goto policy (the standard's rule table) wins over the universal one
+            policy = prohibited.get('goto') or (universal.get('prohibited_constructs', {}).get('goto', 'FORBIDDEN')
+                                                if isinstance(universal, dict) else 'FORBIDDEN')
             if self._applies(policy): out.append(Violation(rule='DO178-GOTO', misra_ref='MISRA-C++:6-6-1', file=fn.file_path,
                                  line=self._body_line(fn, r'\bgoto\b'), function_line=fn.line_number, element=fn.name,
                                  severity=self._policy_to_violation_severity(policy, 'CRITICAL'),

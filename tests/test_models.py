@@ -1,5 +1,5 @@
 from rag_engine.models import (
-    FunctionDef, Parameter, VirtualChange, Violation, DeadCodeItem, LRUCoupling, ParseResult
+    FunctionDef, Parameter, Violation, DeadCodeItem, LRUCoupling
 )
 
 

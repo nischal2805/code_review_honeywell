@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from rag_engine.features.sensor_template import SensorTemplate
 from rag_engine.features.sensor_validation import FLAGS, SampleResult, SensorValidator   # SampleResult re-exported

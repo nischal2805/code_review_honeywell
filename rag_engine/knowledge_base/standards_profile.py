@@ -78,7 +78,6 @@ def _infer_policy(value: str | None, fallback: str) -> str:
 
 
 def parse_standards_document(text: str) -> Dict[str, Any]:
-    compact = _compact_text(text)
     normalized = re.sub(r'\s+', ' ', text)
     normalized_lower = normalized.lower()
 
@@ -135,6 +134,7 @@ def parse_standards_document(text: str) -> Dict[str, Any]:
         'complexity': copy.deepcopy(complexity_a),
         'severities': {
             'prohibited_constructs': {
+                'goto': _infer_policy(rule_02[0] if rule_02 else None, 'FORBIDDEN'),
                 'dynamic_memory': _infer_policy(rule_01[0] if rule_01 else None, 'FORBIDDEN'),
                 'exceptions': _infer_policy(rule_03[0] if rule_03 else None, 'FORBIDDEN'),
                 'recursion': _infer_policy(rule_04[0] if rule_04 else None, 'FORBIDDEN'),
@@ -146,6 +146,7 @@ def parse_standards_document(text: str) -> Dict[str, Any]:
         'complexity': copy.deepcopy(complexity_b),
         'severities': {
             'prohibited_constructs': {
+                'goto': _infer_policy(rule_02[1] if rule_02 else None, 'FORBIDDEN'),
                 'dynamic_memory': _infer_policy(rule_01[1] if rule_01 else None, 'FORBIDDEN'),
                 'exceptions': _infer_policy(rule_03[1] if rule_03 else None, 'FORBIDDEN'),
                 'recursion': _infer_policy(rule_04[1] if rule_04 else None, 'RESTRICTED'),
@@ -157,6 +158,7 @@ def parse_standards_document(text: str) -> Dict[str, Any]:
         'complexity': copy.deepcopy(complexity_c),
         'severities': {
             'prohibited_constructs': {
+                'goto': _infer_policy(rule_02[2] if rule_02 else None, 'FORBIDDEN'),
                 'dynamic_memory': _infer_policy(rule_01[2] if rule_01 else None, 'RESTRICTED'),
                 'exceptions': _infer_policy(rule_03[2] if rule_03 else None, 'RESTRICTED'),
                 'recursion': _infer_policy(rule_04[2] if rule_04 else None, 'ALLOWED'),

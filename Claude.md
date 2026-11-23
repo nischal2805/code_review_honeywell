@@ -26,9 +26,10 @@ rag_engine/
 │   ├── dead_code_detector.py     # Feature 3: Dead/deactivated code classification, finding IDs
 │   ├── control_flow_analyzer.py  # Dead fragments and unused variables (feeds Feature 3)
 │   ├── standards_validator.py    # Feature 4: DO-178C §5.1 + MISRA C++ rule checking
-│   ├── sensor_template.py        # R3: sensor YAML template loader and validation
-│   ├── sensor_analysis.py        # R3: corrupt / stale / debounce checks in the code
-│   └── sensor_data_checker.py    # R3: replay of recorded sensor samples
+│   ├── sensor_template.py        # R3: sensor YAML loader and validation (category, limits, attributes)
+│   ├── sensor_validation.py      # R3: generic validation engine (range / stale / frozen / debounce), one for all sensors
+│   ├── sensor_analysis.py        # R3: discovery, YAML mapping (ambiguity), C++ verification incl. inconclusive
+│   └── sensor_data_checker.py    # R3: CSV replay of recorded samples through the engine
 ├── document_processor/
 │   ├── code_reader.py      # Parse C++ files
 │   ├── doc_reader.py       # Ingest PDF/DOCX LRU specs
@@ -36,7 +37,10 @@ rag_engine/
 ├── knowledge_base/
 │   ├── index_manager.py    # FAISS index lifecycle
 │   ├── cache_manager.py    # Hash-based incremental cache
-│   └── standards_db.py     # MISRA C++ rules + project rules
+│   ├── standards_db.py     # MISRA C++ rules + project rules
+│   ├── standards_profile.py   # built-in default rules; per-DAL rule-table (SCS-L/M) parser
+│   └── standards_document.py  # any uploaded standard -> rules with clause citations + its RAG index
+├── retrieval/              # RAG: chunking, BM25, dense embeddings + re-embedding cache, RRF, reranking
 ├── llm/
 │   ├── ollama_client.py    # Optional Ollama client
 │   ├── rag_narrator.py     # Optional narrative enrichment of reports
@@ -48,6 +52,8 @@ rag_engine/
 ├── templates/              # Jinja2 templates, one per report (incl. function_effect, sensor_analysis)
 └── tui/
     └── app.py              # Textual TUI
+ui/                         # Streamlit UI (app.py pages, views.py, components.py, runner.py background runs)
+run_ui.py                   # python run_ui.py -> Streamlit UI
 main.py                     # Typer CLI entry (analyze, virtuals, effect, sensors, sensor-check, ask, validate-config)
 ```
 
@@ -321,3 +327,11 @@ pyyaml               # Config, sensor templates, dead-code dispositions
 
 **DAL levels supported:** A (MC/DC), B (Decision), C (Statement)  
 **False positive target:** < 2% for dead code detection
+---
+
+## Repository Conventions
+
+- **Commits:** no `Co-Authored-By`, `Claude-Session` or other AI-attribution lines in commit messages or PR
+  descriptions; commits are authored by the repository owner.
+- **Tests:** `python -m pytest tests -o addopts="" -q` (the default `addopts` need pytest-cov). The dense-retrieval
+  tests need torch + sentence-transformers and skip without them.

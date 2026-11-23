@@ -1,7 +1,6 @@
-import pytest
 from pathlib import Path
 from rag_engine.core.parser import CodeParser
-from rag_engine.models import FunctionDef, ParseResult
+from rag_engine.models import ParseResult
 
 FIXTURES = Path(__file__).parent / 'fixtures' / 'cpp'
 BASE = FIXTURES / 'base_build'
