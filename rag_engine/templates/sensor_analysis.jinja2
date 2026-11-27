@@ -1,120 +1,221 @@
-# Sensor Data Analysis Report — R3
-Generated: {{ report_date }}
-DAL Level: {{ dal_level }}
+# Sensor Analysis Report
+Generated: {{ report_date }}   |   DAL Level: {{ dal_level }}
 
-{% set counts = result.status_counts() %}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 1 — What Sensors Exist in This Codebase
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 {% set mapped = findings | selectattr('status', 'equalto', 'found') | list %}
-## A. Overall Summary
+{% set not_mapped = findings | rejectattr('status', 'equalto', 'found') | list %}
+{% set counts = result.status_counts() %}
 
-| Item | Count |
-|------|-------|
-| Sensor classes discovered in the code | {{ result.discovered_sensor_classes | length }} |
-| YAML sensor configurations loaded | {{ findings | length }} |
-| Configurations mapped to a C++ class | {{ mapped | length }} |
-| Sensor classes without a YAML configuration | {{ unmapped | length }} |
-| YAML configurations not mapped (unused or ambiguous) | {{ result.unused_configs | length }} |
-| Checks implemented | {{ counts.get('implemented', 0) }} |
-| Checks missing | {{ counts.get('missing', 0) }} |
-| Configuration-to-code mismatches | {{ counts.get('mismatch', 0) }} |
-| Checks inconclusive | {{ counts.get('inconclusive', 0) }} |
-| Checks disabled by configuration | {{ counts.get('disabled', 0) }} |
-| Checks enabled without a configured value | {{ counts.get('not_configured', 0) }} |
+This codebase contains **{{ result.discovered_sensor_classes | length }} sensor class(es)** found in the C++ source.
+The YAML template file defines **{{ findings | length }} sensor configuration(s)**.
 
-## B. Sensor Inventory
-
-| Sensor | Category | C++ class | Mapping | Acquisition | Processing | Validation | Consumers |
-|--------|----------|-----------|---------|-------------|------------|------------|-----------|
-{% for f in findings %}
-| {{ f.template.name|md_cell }} | {{ f.template.category or '-' }} | {{ (f.class_name or '-')|md_cell }} | {{ f.status }} | {{ (f.sources | map('md_cell') | join('; ')) or '-' }} | {{ (f.processors | map('md_cell') | join('; ')) or '-' }} | {{ (f.validators | map('md_cell') | join('; ')) or '-' }} | {{ (f.consumers | map('md_cell') | join('; ')) or '-' }} |
+**Sensors found and matched to C++ code ({{ mapped | length }}):**
+{% for f in mapped %}
+  - {{ f.template.name }} (category: {{ f.template.category or 'unspecified' }}, unit: {{ f.template.unit or '-' }})
+    → C++ class `{{ f.class_name }}` in {{ f.file_path }}:{{ f.line_number }}
+    → Instantiated in this build: {{ 'YES' if f.instantiated else 'NO (class exists but is never created)' }}
 {% endfor %}
+{% if not not_mapped and not unmapped %}
 
-{% for f in findings %}
-### {{ f.template.name }}
-{% if f.status != 'found' %}
-- Mapping: **{{ f.status }}** — {{ f.note }}
-{% else %}
-- Class: `{{ f.class_name }}` — {{ f.file_path }}:{{ f.line_number }}; instantiated: {{ 'yes' if f.instantiated else 'no' }}
-- Configuration: category {{ f.template.category or '-' }}, unit {{ f.template.unit or '-' }}{% if f.template.attributes %}, attributes {{ f.template.attributes }}{% endif %}
+All configured sensors were found. No gaps.
+{% endif %}
+{% if not_mapped %}
 
-- Constructors: {{ f.constructors | join(', ') or 'none declared' }}
-- Hierarchy: {{ f.hierarchy | join(' → ') }}
-- Data flow: {{ (f.sources | map('replace', ' (', ' @ (') | join(', ')) or 'no acquisition function' }} → {{ (f.processors | map('replace', ' (', ' @ (') | join(', ')) or 'no processing function' }} → {{ (f.validators | map('replace', ' (', ' @ (') | join(', ')) or 'no validation function' }} → {{ (f.consumers | map('replace', ' (', ' @ (') | join(', ')) or 'no consumer' }}
+**Sensors configured in YAML but NOT found in the code ({{ not_mapped | length }}):**
+{% for f in not_mapped %}
+  ⚠  {{ f.template.name }} — {{ f.note }}
+     Fix: check that the C++ class name matches the YAML `name:` (or set `class_name:` explicitly).
+{% endfor %}
+{% endif %}
+{% if unmapped %}
+
+**C++ sensor classes found in code but NOT configured in YAML ({{ unmapped | length }}):**
+{% for cls in unmapped %}
+  ⚠  {{ cls }} — no approved limits defined. Add an entry to the sensor templates YAML.
+{% endfor %}
 {% endif %}
 
-{% endfor %}
-## C. Validation Results
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 2 — What Each Sensor Is Expected to Check
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-| Sensor | Check | YAML expectation | C++ implementation | Result | Confidence |
-|--------|-------|------------------|--------------------|--------|------------|
+Every sensor in aviation software must guard against three types of bad data:
+
+  CORRUPT  — the value is physically impossible (outside the valid range)
+  STALE    — the sensor has stopped sending updates (no new data for too long)
+  DEBOUNCE — the value is jumping/noisy (large sudden changes need confirmation)
+
+The table below shows what the YAML template requires for each sensor:
+
+| Sensor | Corrupt Range | Stale Threshold | Debounce Threshold |
+|--------|--------------|-----------------|-------------------|
+{% for f in findings %}
+| {{ f.template.name }} | {% if f.template.valid_min is not none and f.template.valid_max is not none %}{{ '%.10g' % f.template.valid_min }} to {{ '%.10g' % f.template.valid_max }} {{ f.template.unit }}{% elif not f.template.corrupt_range_check %}disabled{% else %}not configured{% endif %} | {% if f.template.stale_threshold_ms is not none %}{{ '%.10g' % f.template.stale_threshold_ms }} ms{% else %}not configured{% endif %} | {% if not f.template.debounce_enabled %}disabled{% elif f.template.debounce_threshold is not none %}{{ '%.10g' % f.template.debounce_threshold }} {{ f.template.unit }}{% else %}not configured{% endif %} |
+{% endfor %}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 3 — Does the C++ Code Actually Implement These Checks?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The analyzer read every comparison operator (<, <=, >, >=) in the sensor
+code and checked whether the numeric values match what the YAML requires.
+
+Legend:
+  ✓ IMPLEMENTED    — found in the code with the correct value
+  ✗ MISSING        — no comparison found at all
+  ⚠ MISMATCH       — found a comparison but with a different value than YAML
+  ~ INCONCLUSIVE   — found a comparison but could not confirm the exact value
+  - NOT CONFIGURED — the YAML has no value to check against
+  ○ DISABLED       — this check is intentionally turned off in the YAML
+
 {% for f in mapped %}
+─────────────────────────────────────────────────
+### {{ f.template.name }}
+Class: `{{ f.class_name }}`   File: {{ f.file_path }}:{{ f.line_number }}
+
+Data flow in the code:
+  Reads data from : {{ f.sources | join(', ') or 'no read() / sample() method found' }}
+  Processes via   : {{ f.processors | join(', ') or 'none' }}
+  Validates via   : {{ f.validators | join(', ') or 'none' }}
+  Sends data to   : {{ f.consumers | join(', ') or 'none' }}
+
+Check Results:
 {% for name, c in f.checks.items() %}
-| {{ f.template.name|md_cell }} | {{ name }} | {{ c.configured | replace('_', ' ') }}{% if c.configured != 'disabled' %}: {{ c.expected|md_cell }}{% endif %} | {% if c.functions %}detected in {{ c.functions | map('md_cell') | join('; ') }}{% if c.found %} (limits {% for v in c.found %}{{ '%.10g' % v }}{{ ', ' if not loop.last }}{% endfor %}){% endif %}{% elif c.configured == 'enabled' %}not detected{% else %}not verified{% endif %} | {{ c.status }} | {{ c.confidence or '-' }} |
+{% if c.status == 'implemented' %}
+  ✓ {{ "%-10s" | format(name | upper) }} PASS — Expected {{ c.expected }}, found {{ c.found | join(', ') }} in the code.
+{% elif c.status == 'missing' %}
+  ✗ {{ "%-10s" | format(name | upper) }} FAIL — Expected {{ c.expected }} but NO {{ name }} check was found in the code.
+     → Action required: add a {{ name }} check to {{ f.class_name }}.
+{% elif c.status == 'mismatch' %}
+  ⚠ {{ "%-10s" | format(name | upper) }} FAIL — Expected {{ c.expected }} but code uses {{ c.found | join(', ') }}.
+     → The value in the code does not match the approved limit in the YAML.
+     → Action required: align the code value with the YAML, or update the YAML if the limit changed.
+{% elif c.status == 'inconclusive' %}
+  ~ {{ "%-10s" | format(name | upper) }} INCONCLUSIVE — {{ c.expected }}. {{ c.note }}
+     → The check may exist but the analyzer could not confirm the exact constant value.
+{% elif c.status == 'not_configured' %}
+  - {{ "%-10s" | format(name | upper) }} SKIPPED — {{ c.expected }}.
+     → Add a {{ name }} threshold to the YAML template to enable this check.
+{% elif c.status == 'disabled' %}
+  ○ {{ "%-10s" | format(name | upper) }} DISABLED — {{ c.expected }}.
+{% endif %}
+{% if c.evidence %}
+     Evidence (where in the code):
+{% for e in c.evidence[:3] %}
+       {{ e }}
 {% endfor %}
+{% endif %}
 {% endfor %}
 
-## D. Issues and Recommendations
+{% endfor %}
+{% if not mapped %}
+No sensors were matched to C++ classes. No validation checks could be verified.
+{% endif %}
 
+{% set issues = [] %}
+{% for f in findings %}
+{% for name, c in f.checks.items() if c.status in ('missing', 'mismatch', 'inconclusive') %}
+{% set _ = issues.append((f.template.name, name, c)) %}
+{% endfor %}
+{% endfor %}
+{% for f in not_mapped %}
+{% set _ = issues.append((f.template.name, 'mapping', f)) %}
+{% endfor %}
+{% if issues %}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 4 — Action Items ({{ issues | length }} issue(s) to fix)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {% set ns = namespace(n=0) %}
 {% for f in findings %}
-{% if f.status != 'found' %}
+{% for name, c in f.checks.items() if c.status in ('missing', 'mismatch', 'inconclusive') %}
 {% set ns.n = ns.n + 1 %}
-{{ ns.n }}. **{{ f.template.name }} — mapping {{ f.status }}.** {{ f.note }}. Recommendation: set `class_name` to the intended C++ class{% if f.status == 'not_found' %}, or add the sensor class to the code{% endif %}.
-{% endif %}
-{% for name, c in f.checks.items() if c.status in ('missing', 'mismatch', 'inconclusive', 'not_configured') %}
+{{ ns.n }}. [{{ f.template.name }}] {{ name | upper }} {{ c.status | upper }}
+   Expected : {{ c.expected }}
+{% if c.found %}   Found    : {{ c.found | join(', ') }}{% endif %}
+
+   {{ c.note if c.note else c.recommendation if c.recommendation else '' }}
+{% for e in c.evidence[:2] %}   Code ref : {{ e }}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% for f in not_mapped %}
 {% set ns.n = ns.n + 1 %}
-{{ ns.n }}. **{{ f.template.name }} — {{ name }} {{ c.status }}.** Expected: {{ c.expected }}. Detected: {{ c.note }}
-{% for e in c.evidence[:3] %}
-   - `{{ e }}`
-{% endfor %}
-{% if c.recommendation %}
-   - Recommendation: {{ c.recommendation }}
-{% endif %}
-{% endfor %}
+{{ ns.n }}. [{{ f.template.name }}] CLASS NOT FOUND
+   The YAML template has no matching C++ class. {{ f.note }}
 {% endfor %}
 {% for cls in unmapped %}
 {% set ns.n = ns.n + 1 %}
-{{ ns.n }}. **{{ cls }} — no YAML configuration.** The class looks like a sensor (derived from a sensor base, named `*Sensor`, or has a numeric read/sample/acquire method) but no configuration maps to it. Recommendation: add an entry with its approved limits, or ignore it if it is not a sensor.
+{{ ns.n }}. [{{ cls }}] NO YAML CONFIGURATION
+   This sensor class has no approved limits defined in the YAML template file.
 {% endfor %}
-{% if ns.n == 0 %}
-No issues found.
+{% else %}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 4 — Action Items
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ No issues found. All configured checks are implemented correctly.
 {% endif %}
 
 {% if replay %}
-## CSV Replay — {{ replay.source }}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 5 — CSV Data Replay: Row-by-Row Analysis
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The configured rules applied to the supplied samples by the generic validation engine. This shows how the
-rules treat this data; it does not show that the C++ runtime behaves the same way.
+Source file: {{ replay.source }}
 
-| Sensor | Samples | Corrupt | Stale | Frozen | Debounce held |
-|--------|---------|---------|-------|--------|---------------|
+This section replays each row of the CSV through the configured rules and
+shows whether that reading would PASS or FAIL, and exactly why.
+
+NOTE: This tests the RULES as configured in YAML. It does not prove the
+C++ runtime behaves the same way — that is what Part 3 above verifies.
+
 {% for name, r in replay.sensors.items() %}
-| {{ name|md_cell }} | {{ r.counts.total }} | {{ r.counts.corrupt }} | {{ r.counts.stale }} | {{ r.counts.frozen }} | {{ r.counts.debounce }} |
+─────────────────────────────────────────────────
+### {{ name }}
+
+Summary: {{ r.counts.total }} samples total —
+  Corrupt  : {{ r.counts.corrupt }} sample(s) with impossible values
+  Stale    : {{ r.counts.stale }} sample(s) with no update for too long
+  Frozen   : {{ r.counts.frozen }} sample(s) where value is stuck/unchanged
+  Debounce : {{ r.counts.debounce }} sample(s) held back as too noisy
+
+Row-by-row results:
+| Row | Time (ms) | Value | Status | Accepted Value | Reason |
+|-----|-----------|-------|--------|---------------|--------|
+{% for s in r.results %}
+| {{ loop.index }} | {{ '%.10g' % s.timestamp_ms }} | {{ '%.10g' % s.value }} | {% if not s.flags %}✓ PASS{% else %}✗ FAIL{% endif %} | {{ '%.10g' % s.accepted_value if s.accepted_value is not none else '—' }} | {% if not s.flags %}All checks passed{% else %}{{ s.flags | join(' + ') | upper }}{% if 'corrupt' in s.flags %}: value {{ '%.10g' % s.value }} is outside the valid range{% endif %}{% if 'stale' in s.flags %}: no update received in time{% endif %}{% if 'frozen' in s.flags %}: value has not changed despite updates{% endif %}{% if 'debounce' in s.flags %}: value changed too suddenly, holding previous{% endif %}{% endif %} |
 {% endfor %}
-{% for name, r in replay.sensors.items() %}
-{% set flagged = r.results | selectattr('flags') | list %}
-{% if flagged %}
 
-- {{ name }}: {% for s in flagged[:10] %}t={{ '%.10g' % s.timestamp_ms }} ms value={{ '%.10g' % s.value }} ({{ s.flags | join(', ') }}){{ '; ' if not loop.last }}{% endfor %}{% if flagged | length > 10 %}; … {{ flagged | length - 10 }} more{% endif %}
-
-{% endif %}
 {% endfor %}
 {% if replay.unknown_sensors %}
-- Samples for sensors with no configuration (not checked): {{ replay.unknown_sensors | join(', ') }}
+⚠ The following sensors appear in the CSV but have no YAML configuration (not checked):
+{% for s in replay.unknown_sensors %}  - {{ s }}
+{% endfor %}
 {% endif %}
 {% if replay.without_samples %}
-- Configured sensors without samples: {{ replay.without_samples | join(', ') }}
+ℹ The following configured sensors had no rows in the CSV:
+{% for s in replay.without_samples %}  - {{ s }}
+{% endfor %}
+{% endif %}
 {% endif %}
 
-{% endif %}
-## E. Analysis Limitations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PART 6 — Analysis Limitations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {% for l in result.limitations %}
 - {{ l }}
 {% endfor %}
-- These results support engineering review; they do not demonstrate DO-178C or any other certification compliance.
+- These results support engineering review; they do not demonstrate DO-178C compliance by themselves.
 
 {% if llm_narrative %}
-## AI Assessment (local LLM — explanation of the findings above)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## AI Assessment (Ollama — explanation of the findings above)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {{ llm_narrative }}
 {% endif %}

@@ -94,6 +94,8 @@ class ConfigScreen(Screen):
             yield Input(placeholder="/path/to/coding_standards.pdf", id="standards-file")
             yield Static("Sensor templates file (optional — default: sensor_templates_file in config.yaml)")
             yield Input(placeholder="/path/to/sensor_templates.yaml", id="sensor-templates")
+            yield Static("Sensor samples CSV (optional — replays recorded readings through the rules)")
+            yield Input(placeholder="/path/to/sensor_samples.csv", id="sensor-samples-csv")
             yield Checkbox("Use semantic search (needs sentence-transformers)", value=True, id="semantic-search")
             yield Static("Output format")
             yield Select(
@@ -142,6 +144,7 @@ class ConfigScreen(Screen):
             lru_docs = self.query_one("#lru-docs", Input).value.strip() or None
             standards_file = self.query_one("#standards-file", Input).value.strip() or None
             sensor_templates = self.query_one("#sensor-templates", Input).value.strip() or None
+            sensor_samples_csv = self.query_one("#sensor-samples-csv", Input).value.strip() or None
             output_fmt = self.query_one("#output-format", Select).value
             dal = self.query_one("#dal-level", Select).value
             if standards_file and not Path(standards_file).expanduser().exists():
@@ -150,9 +153,16 @@ class ConfigScreen(Screen):
             if sensor_templates and not Path(sensor_templates).expanduser().exists():
                 self.notify(f"Sensor templates file not found: {sensor_templates}", severity="error", markup=False)
                 return
+            if sensor_samples_csv and not Path(sensor_samples_csv).expanduser().exists():
+                self.notify(f"Sensor samples CSV not found: {sensor_samples_csv}", severity="error", markup=False)
+                return
+            if sensor_samples_csv and not sensor_templates:
+                self.notify("Sensor samples CSV requires a sensor templates file — please fill in the templates field too.", severity="warning", markup=False)
+                return
             semantic_search = self.query_one("#semantic-search", Checkbox).value
             self.app.push_screen(AnalysisScreen(codebase, base_build, lru_docs, standards_file, str(output_fmt),
-                                                str(dal), sensor_templates, semantic_search=semantic_search))
+                                                str(dal), sensor_templates, semantic_search=semantic_search,
+                                                sensor_samples_csv=sensor_samples_csv))
 
 
 def _format_profile(profile: dict[str, Any]) -> str:
@@ -267,7 +277,7 @@ class AnalysisScreen(Screen):
     def __init__(self, codebase: str, base_build: Optional[str], lru_docs: Optional[str],
                  standards_file: Optional[str], output_fmt: str, dal: str,
                  sensor_templates: Optional[str] = None, cfg: Optional[Config] = None,
-                 semantic_search: bool = True) -> None:
+                 semantic_search: bool = True, sensor_samples_csv: Optional[str] = None) -> None:
         super().__init__()
         self._semantic_search = semantic_search
         self._codebase = codebase
@@ -277,6 +287,7 @@ class AnalysisScreen(Screen):
         self._output_fmt = output_fmt
         self._dal = dal
         self._sensor_templates = sensor_templates
+        self._sensor_samples_csv = sensor_samples_csv
         self._cfg = cfg
         self._results = AnalysisResults()
         self._finished = False
@@ -359,6 +370,8 @@ class AnalysisScreen(Screen):
                 cfg.standards_file = self._standards_file
             if self._sensor_templates:
                 cfg.sensor_templates_file = self._sensor_templates
+            if self._sensor_samples_csv:
+                cfg.sensor_samples_file = self._sensor_samples_csv
             if not cfg.sensor_templates_file:
                 self.app.call_from_thread(self._skip_sensors)
             if not self._semantic_search:
